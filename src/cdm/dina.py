@@ -103,6 +103,22 @@ class DINA:
         """
         p_correct = eta * (1 - slip[:, None]) + (1 - eta) * guess[:, None]  # (J, L)
         return skill_profile_probas @ p_correct.T  # (N, J)
+    
+    def pred_profile_probas(self, X):
+        with localconverter(ro.default_converter + pandas2ri.converter):
+            guess = np.asarray(ro.r('guess'))  # (J,)
+            slip  = np.asarray(ro.r('slip'))   # (J,)
+            Q     = np.asarray(ro.r('Q_matrix'))  # (J, K)
+
+        K = Q.shape[1]
+        A = self.enumerate_profiles(K)  # (L, K)
+
+        eta = (A[None, :, :] >= Q[:, None, :]).all(axis=2).astype(int)  # (J, L)
+
+        log_like = self.log_likelihood(X, eta, guess, slip)
+        log_post = log_like - logsumexp(log_like, axis=1, keepdims=True)
+
+        return np.exp(log_post)  # (N, L)
 
     def pred_item_probas(self, X):
         with localconverter(ro.default_converter + pandas2ri.converter):
