@@ -168,17 +168,6 @@ class MoLA(Train):
 
         return log_post  # np.exp(log_post)
 
-    # def get_log_posterior(self, X):
-    #     """
-    #     Apply user evidence to compute log posterior.
-    #     """
-    #     X1, X2 = self.create_X1_and_X2(X)
-    #     # compute log posterior
-    #     unnorm_log_post = self.get_log_likelihood(X1, X2) + np.log(self.pi.T)
-    #     log_post = unnorm_log_post - logsumexp(unnorm_log_post, axis=1)[:, None]
-
-    #     return log_post
-
     def get_posterior(self, X):
         """
         Exponentiate log posterior. Returns component probabilities.
@@ -499,10 +488,9 @@ class MoLA(Train):
 
         # Updated responsbilities
         new_unorm_post =a**x * b**(1-x) * old_unorm_post
-        # 
         # Updated proficies
         psi = (new_unorm_post @ self.mu).flatten()
 
-        return psi, new_post
+        return psi
 
 

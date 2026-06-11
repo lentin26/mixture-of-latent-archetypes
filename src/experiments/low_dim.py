@@ -102,6 +102,7 @@ def fit_mola(splits, Q_df):
     nll_trains, nll_tests = [], []
     brier_trains, brier_tests = [], []
     y_true_tests, y_probas_tests = [], []
+    final_results = []
     for X_train_df, X_test_df in splits:
 
         X_train = X_train_df.to_numpy()
@@ -148,26 +149,28 @@ def fit_mola(splits, Q_df):
         nll_trains.append(model.get_pred_nll(X_train))
         nll_tests.append(model.get_pred_nll(X_test))
 
-        result = {
-            "model": "MoLA",
-            "nll_train": nll_trains,
-            "nll_test": nll_tests,
-            "auc_train": auc_trains,
-            "auc_test": auc_tests,
-            "brier_train": brier_trains,
-            "brier_test": brier_tests,
-            "y_probas_test": y_probas_tests,
-            "y_true_test": y_true_tests
-        }
+    result = {
+        "model": "MoLA",
+        "nll_train": nll_trains,
+        "nll_test": nll_tests,
+        "auc_train": auc_trains,
+        "auc_test": auc_tests,
+        "brier_train": brier_trains,
+        "brier_test": brier_tests,
+        "y_probas_test": y_probas_tests,
+        "y_true_test": y_true_tests
+    }
 
-        return result
+    final_results.append(result)
+
+    return final_results
 
 def plot_calibrations(final_results, model_names, n_bins=10):
     
     colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
 
     # Create 2x2 layout
-    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(6, 6))
     axes = axes.flatten()
 
     for i, model_name in enumerate(model_names):
@@ -190,7 +193,7 @@ def plot_calibrations(final_results, model_names, n_bins=10):
             duplicates='drop'
         )
 
-        calibration = data.groupby('bin').agg(
+        calibration = data.groupby('bin', observed=False).agg(
             mean_pred=('y_proba', 'mean'),
             mean_true=('y_true', 'mean'),
             std_true=('y_true', 'std'),
