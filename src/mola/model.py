@@ -174,6 +174,18 @@ class MoLA(Train):
         """
         return np.exp(self.get_log_posterior(X))
 
+    def get_mu_slice(self, skill_idxs:list=None):
+        """
+        Return the archetype-profile matrix ``mu`` restricted to ``skill_idxs``.
+
+        ``mu`` has shape ``(n_components, n_skills)``; this selects the columns
+        named by ``skill_idxs`` (a list/array of skill indices). ``None`` returns
+        every skill, i.e. ``mu`` unchanged.
+        """
+        if skill_idxs is None:
+            return self.mu
+        return self.mu[:, skill_idxs]
+
     def pred_attr_probas(self, X, skill_idxs:list=None, return_post:bool=False):
         """
         X: array of shape (n_datapoints, n_items) representing emprical item
@@ -409,21 +421,15 @@ class MoLA(Train):
         if (self.a is None) | (self.b is None):
             self.update_ab_params(use_norm=True)
 
-        # return post @ self.mu @ self.Q.T / self.Q.sum(axis=1).T
+        # a, b are the log-scale "ab" artifacts of shape (J, M); restrict to the
+        # requested items up front so both branches below stay identical.
         a = self.a[item_idxs, :] if item_idxs is not None else self.a
         b = self.b[item_idxs, :] if item_idxs is not None else self.b
 
-        if item_idxs is None:
-            log_p1 = a.T  # (N, J)
-            log_p2 = b.T  # (N, J)
-        else:
-            log_p1 = self.a[item_idxs, :] 
-            log_p2 = self.b[item_idxs, :]
-        
-        # Component-wise sigmoid of shape (M, J)
-        s = 1 / (1 + np.exp(log_p2 - log_p1))
+        # Component-wise sigmoid of shape (M, J_selected)
+        s = 1 / (1 + np.exp(b.T - a.T))
 
-        # Return mixture of sigmoids
+        # Return mixture of sigmoids, shape (N, J_selected)
         return post @ s
     
     def reshape_to_row_vectors(self, x):

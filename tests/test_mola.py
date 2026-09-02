@@ -331,10 +331,6 @@ def test_pred_item_probas_accepts_dense_or_sparse(fitted, toy):
     np.testing.assert_allclose(dense, sparse)
 
 
-@pytest.mark.xfail(
-    reason="pred_item_probas_from_resp does not transpose a/b on the item_idxs path",
-    strict=True,
-)
 def test_pred_item_probas_item_subset_matches_full(fitted, toy):
     idxs = [0, 3, 7, 11]
     full = fitted.pred_item_probas(toy["X"])
@@ -546,13 +542,52 @@ def test_component_redundancy_report_flags_underused_component(fitted):
 
 
 # --------------------------------------------------------------------------- #
-# known-broken methods — xfail so a future fix flips them green
+# skill-space read-outs (built on get_mu_slice)
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(reason="MoLA.get_mu_slice is referenced but never defined", strict=True)
-def test_pred_skill_probas(fitted, toy):
-    fitted.pred_skill_probas(fitted.convert_dense_to_sparse(toy["X"]))
+def test_get_mu_slice_returns_full_mu_by_default(fitted):
+    assert fitted.get_mu_slice() is fitted.mu
 
 
-@pytest.mark.xfail(reason="MoLA.get_mu_slice is referenced but never defined", strict=True)
-def test_get_prior_exp_skill_prof(fitted):
-    fitted.get_prior_exp_skill_prof()
+def test_get_mu_slice_selects_named_skill_columns(fitted):
+    idxs = [0, 2, 3]
+    sliced = fitted.get_mu_slice(idxs)
+    assert sliced.shape == (N_COMPONENTS, len(idxs))
+    np.testing.assert_array_equal(sliced, fitted.mu[:, idxs])
+
+
+def test_pred_skill_probas_are_convex_combinations_of_archetypes(fitted, toy):
+    sparse_x = fitted.convert_dense_to_sparse(toy["X"])
+    probs = fitted.pred_skill_probas(sparse_x)
+    assert probs.shape == (N_LEARNERS, N_SKILLS)
+    lo, hi = fitted.mu.min(axis=0), fitted.mu.max(axis=0)
+    assert np.all(probs >= lo - 1e-9) and np.all(probs <= hi + 1e-9)
+
+
+def test_pred_attr_probas_skill_subset_matches_full(fitted, toy):
+    sparse_x = fitted.convert_dense_to_sparse(toy["X"])
+    idxs = [1, 3]
+    full = fitted.pred_attr_probas(sparse_x)
+    subset = fitted.pred_attr_probas(sparse_x, skill_idxs=idxs)
+    np.testing.assert_allclose(subset, full[:, idxs])
+
+
+def test_pred_attr_probas_return_post_also_yields_the_posterior(fitted, toy):
+    sparse_x = fitted.convert_dense_to_sparse(toy["X"])
+    profiles, post = fitted.pred_attr_probas(sparse_x, return_post=True)
+    assert profiles.shape == (N_LEARNERS, N_SKILLS)
+    np.testing.assert_allclose(post, fitted.get_posterior(sparse_x))
+
+
+def test_pred_skill_probas_from_post_matches_posterior_times_mu(fitted, toy):
+    sparse_x = fitted.convert_dense_to_sparse(toy["X"])
+    post = fitted.get_posterior(sparse_x)
+    np.testing.assert_allclose(
+        fitted.pred_skill_probas_from_post(post), post @ fitted.mu
+    )
+
+
+def test_get_prior_exp_skill_prof_is_weighted_mean_of_archetypes(fitted):
+    prof = fitted.get_prior_exp_skill_prof()
+    assert prof.shape == (N_SKILLS,)
+    np.testing.assert_allclose(prof, (fitted.pi.ravel() @ fitted.mu))
+    assert np.all((prof >= 0.0) & (prof <= 1.0))
