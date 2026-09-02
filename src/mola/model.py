@@ -197,19 +197,94 @@ class MoLA(Train):
         return profiles
 
     def get_effective_attr_dim(self):
-        """Measure effective attribute space dimensionality"""
-        M = self.mu  # shape: (n_components, n_attributes)
+        """
+        Effective dimensionality (participation ratio) of the archetype-profile
+        matrix ``mu``.
 
-        # Center manually (important for affine span)
-        M_centered = M - M.mean(axis=0, keepdims=True)
+        The value lies in ``[1, min(n_components - 1, n_skills)]``: it is ~1 when
+        every archetype profile lines up along a single direction (highly
+        redundant components) and rises toward its ceiling when the profiles vary
+        along independent directions.  Because the non-zero spectra of the
+        component-by-component and skill-by-skill covariances coincide, this also
+        reads as the effective number of *distinct* archetype profiles.
+        """
+        n_components = self.mu.shape[0]
+        if n_components < 2:
+            return float(n_components)
 
-        # Compute covariance across components
-        cov = np.cov(M_centered, rowvar=False)
+        # np.cov re-centers internally; centering here as well is harmless.
+        mu_centered = self.mu - self.mu.mean(axis=0, keepdims=True)
+        cov = np.atleast_2d(np.cov(mu_centered, rowvar=False))
 
-        eigenvalues, _ = np.linalg.eigvalsh(cov)
+        # eigvalsh returns just the (ascending) eigenvalues; clip the tiny
+        # negative values it produces for near-singular covariances.
+        eigenvalues = np.clip(np.linalg.eigvalsh(cov), 0.0, None)
 
-        eff_dim = (eigenvalues).sum()**2 / (eigenvalues**2).sum()
-        return eff_dim
+        total = eigenvalues.sum()
+        if total <= 1e-12:
+            # all profiles identical -> a single effective dimension
+            return 1.0
+        return float(total**2 / np.square(eigenvalues).sum())
+
+    def component_redundancy_report(self, X=None):
+        """
+        Diagnose whether any mixture components have become redundant.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_datapoints, n_items), optional
+            Learner responses.  When supplied, the report also measures how much
+            posterior mass each component actually carries.
+
+        Returns
+        -------
+        dict
+            ``effective_attr_dim``
+                Participation ratio of ``mu`` (see
+                :meth:`get_effective_attr_dim`) -- profile-space spread.
+            ``effective_n_components``
+                Inverse Simpson index ``1 / sum(pi**2)`` of the mixture weights:
+                the number of components carrying non-trivial prior mass.
+            ``weight_min`` / ``weight_argmin``
+                The smallest mixture weight and the component it belongs to.
+            ``closest_pair``
+                ``(i, j)`` of the two components with the most similar profiles
+                (``None`` when there is only one component).
+            ``closest_pair_distance``
+                Euclidean distance between that pair's ``mu`` rows; a small value
+                means a duplicated archetype.
+            ``posterior_usage``
+                Present only when ``X`` is given: mean posterior responsibility
+                per component, shape ``(n_components,)``.  Near-zero entries are
+                components no learner loads onto.
+        """
+        pi = self.pi.ravel()
+        n_components = pi.shape[0]
+
+        report = {
+            "effective_attr_dim": self.get_effective_attr_dim(),
+            "effective_n_components": float(1.0 / np.square(pi).sum()),
+            "weight_min": float(pi.min()),
+            "weight_argmin": int(pi.argmin()),
+        }
+
+        if n_components >= 2:
+            diff = self.mu[:, None, :] - self.mu[None, :, :]
+            dist = np.sqrt(np.square(diff).sum(axis=-1))
+            np.fill_diagonal(dist, np.inf)
+            i, j = np.unravel_index(np.argmin(dist), dist.shape)
+            report["closest_pair"] = (int(min(i, j)), int(max(i, j)))
+            report["closest_pair_distance"] = float(dist[i, j])
+        else:
+            report["closest_pair"] = None
+            report["closest_pair_distance"] = float("nan")
+
+        if X is not None:
+            if isinstance(X, np.ndarray):
+                X = self.convert_dense_to_sparse(X)
+            report["posterior_usage"] = self.get_posterior(X).mean(axis=0)
+
+        return report
     
     def pred_skill_probas_from_post(self, g, skill_idxs:list=None):
         """

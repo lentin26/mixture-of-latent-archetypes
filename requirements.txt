@@ -1,0 +1,21 @@
+# Core runtime dependencies for src/mola and src/simulations.
+# Tested with Python 3.9.
+numpy>=1.24,<2.0
+pandas>=1.5
+scipy>=1.10
+scikit-learn>=1.2
+tqdm>=4.65
+
+# Plotting for the notebooks and src/experiments.
+matplotlib>=3.7
+
+# Testing.
+pytest>=8.0
+
+# Optional: only needed by MoLA.pred_item_probas_numba().
+# numba>=0.58
+
+# Optional: only needed by src/utils/datasets (downloads R-format datasets).
+# requests>=2.31
+# pyreadr>=0.5
+# rpy2>=3.5
