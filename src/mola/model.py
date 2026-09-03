@@ -2,21 +2,22 @@
 import numpy as np
 from scipy.special import logsumexp, logit
 from scipy.stats import beta
-from scipy.sparse import SparseEfficiencyWarning, csr_matrix
+from scipy.sparse import SparseEfficiencyWarning
 import warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
-from src.mola import Train
+from src.mola.train import _MoLABase
 
 
-class MoLA(Train):
+class MoLA(_MoLABase):
     """
     MoLA with item difficulty (Lentini 2025).
 
     Theta is related to difficulty by the following relationship:
         theta = (1 - d_j)^{n_j}
+
+    Fitting and hyper-parameters live on :class:`_MoLABase`; this class adds the
+    posterior, predictive and psi/difficulty read-outs.
     """
-    def __init__(self, **kwargs):
-        Train.__init__(self, **kwargs)
 
     def get_item_cov(self, skill_idxs=None):
         """
@@ -26,7 +27,7 @@ class MoLA(Train):
 
         # item-response probabilities for each distinct profile
         post = np.diag(np.ones(M))
-        sigma = self.pred_item_probas_from_resp(post)
+        sigma = self._item_proba_from_resp(post)
 
         # Sigma_m as diagonals (M, J, J)
         Sigma = np.zeros((M, J, J))
@@ -62,34 +63,8 @@ class MoLA(Train):
 
         return Q.T @ L @ Q
 
-    def get_exp_skill_correct_attempt_corr(self, skill_idxs):
-        """
-        Calculate expected skill correct attempt score covariance matrix.
-        """
-        # attribute covariance
-        cov = self.get_exp_skill_score_cov(skill_idxs)
-        # convert cov into corr matrix
-        R = self.convert_cov_to_corr(cov)    
-
-        return R
-    
-    def get_skill_score_cor(self, m, skill_idxs=None):
-        S = self.get_skill_score_cov(m, skill_idxs)
-        return self.convert_cov_to_corr(S)
-
-    def get_item_corr(self, skill_idxs):
-        """
-        Calculate attribute covariance matrix.
-        """
-        # compute covariance
-        Λ = self.get_item_cov(self.Q, skill_idxs) 
-        # convert cov into corr matrix
-        R = self.convert_cov_to_corr(Λ) 
-
-        return R
-
     def get_proficiency_cov(self, X, skill_idxs:list=None):
-        g = self.get_posterior(X)
+        g = self.predict_proba(X)
 
         if skill_idxs is not None:
             mu_a, mu_b = self.mu_a[:, skill_idxs], self.mu_b[:, skill_idxs]
@@ -168,11 +143,19 @@ class MoLA(Train):
 
         return log_post  # np.exp(log_post)
 
-    def get_posterior(self, X):
+    def predict_proba(self, X):
         """
-        Exponentiate log posterior. Returns component probabilities.
+        Archetype responsibilities for each learner.
+
+        Parameters
+        ----------
+        X : (n_learners, n_items) dense ndarray (NaN = missing) or SciPy sparse.
+
+        Returns
+        -------
+        (n_learners, n_components) ndarray whose rows sum to 1.
         """
-        return np.exp(self.get_log_posterior(X))
+        return np.exp(self.get_log_posterior(self._prepare_X(X)))
 
     def get_mu_slice(self, skill_idxs:list=None):
         """
@@ -186,39 +169,31 @@ class MoLA(Train):
             return self.mu
         return self.mu[:, skill_idxs]
 
-    def pred_attr_probas(self, X, skill_idxs:list=None, return_post:bool=False):
+    def predict_skill_proba(self, X, skill_idxs:list=None):
         """
-        X: array of shape (n_datapoints, n_items) representing emprical item
-            response data.
-        Q: array of shape (n_items, n_attributes) representing binary relationship
-            between items and attributes.
-        mask: array of shape (n_datapoints, n_items) is 1 whereever X is not null 
-            and 0 otherwise.
+        Expected skill mastery for each learner: ``predict_proba(X) @ mu``.
 
-        Returns:
-            array of shape (n_datapoints, n_attributes) representing estimated
-            attribute proficiency scores.
+        Parameters
+        ----------
+        X : (n_learners, n_items) dense ndarray (NaN = missing) or SciPy sparse.
+        skill_idxs : list of int, optional
+            Restrict the output to these skill columns.
+
+        Returns
+        -------
+        (n_learners, n_skills) ndarray in ``[0, 1]``.
         """
-        # get mixture weights \gamma(z_{im})
-        post = self.get_posterior(X)
-        profiles = post @ self.get_mu_slice(skill_idxs)
+        return self.predict_proba(X) @ self.get_mu_slice(skill_idxs)
 
-        if return_post:
-            return profiles, post
-
-        return profiles
-
-    def get_effective_attr_dim(self):
+    def effective_n_archetypes(self):
         """
-        Effective dimensionality (participation ratio) of the archetype-profile
-        matrix ``mu``.
+        Effective number of distinct archetype profiles: the participation ratio
+        (``(sum lambda)**2 / sum lambda**2``) of the centered ``mu`` matrix.
 
         The value lies in ``[1, min(n_components - 1, n_skills)]``: it is ~1 when
         every archetype profile lines up along a single direction (highly
-        redundant components) and rises toward its ceiling when the profiles vary
-        along independent directions.  Because the non-zero spectra of the
-        component-by-component and skill-by-skill covariances coincide, this also
-        reads as the effective number of *distinct* archetype profiles.
+        redundant archetypes) and rises toward its ceiling when the profiles vary
+        along independent directions.
         """
         n_components = self.mu.shape[0]
         if n_components < 2:
@@ -238,43 +213,43 @@ class MoLA(Train):
             return 1.0
         return float(total**2 / np.square(eigenvalues).sum())
 
-    def component_redundancy_report(self, X=None):
+    def redundancy_report(self, X=None):
         """
-        Diagnose whether any mixture components have become redundant.
+        Diagnose whether any archetypes have become redundant.
 
         Parameters
         ----------
-        X : array-like of shape (n_datapoints, n_items), optional
+        X : (n_learners, n_items) dense ndarray or SciPy sparse, optional
             Learner responses.  When supplied, the report also measures how much
-            posterior mass each component actually carries.
+            posterior mass each archetype actually carries.
 
         Returns
         -------
         dict
-            ``effective_attr_dim``
-                Participation ratio of ``mu`` (see
-                :meth:`get_effective_attr_dim`) -- profile-space spread.
+            ``effective_n_archetypes``
+                Participation ratio of ``mu`` (see :meth:`effective_n_archetypes`)
+                -- profile-space spread.
             ``effective_n_components``
                 Inverse Simpson index ``1 / sum(pi**2)`` of the mixture weights:
-                the number of components carrying non-trivial prior mass.
+                the number of archetypes carrying non-trivial prior mass.
             ``weight_min`` / ``weight_argmin``
-                The smallest mixture weight and the component it belongs to.
+                The smallest mixture weight and the archetype it belongs to.
             ``closest_pair``
-                ``(i, j)`` of the two components with the most similar profiles
-                (``None`` when there is only one component).
+                ``(i, j)`` of the two archetypes with the most similar profiles
+                (``None`` when there is only one archetype).
             ``closest_pair_distance``
                 Euclidean distance between that pair's ``mu`` rows; a small value
                 means a duplicated archetype.
             ``posterior_usage``
                 Present only when ``X`` is given: mean posterior responsibility
-                per component, shape ``(n_components,)``.  Near-zero entries are
-                components no learner loads onto.
+                per archetype, shape ``(n_components,)``.  Near-zero entries are
+                archetypes no learner loads onto.
         """
         pi = self.pi.ravel()
         n_components = pi.shape[0]
 
         report = {
-            "effective_attr_dim": self.get_effective_attr_dim(),
+            "effective_n_archetypes": self.effective_n_archetypes(),
             "effective_n_components": float(1.0 / np.square(pi).sum()),
             "weight_min": float(pi.min()),
             "weight_argmin": int(pi.argmin()),
@@ -292,128 +267,48 @@ class MoLA(Train):
             report["closest_pair_distance"] = float("nan")
 
         if X is not None:
-            if isinstance(X, np.ndarray):
-                X = self.convert_dense_to_sparse(X)
-            report["posterior_usage"] = self.get_posterior(X).mean(axis=0)
+            report["posterior_usage"] = self.predict_proba(X).mean(axis=0)
 
         return report
-    
-    def pred_skill_probas_from_post(self, g, skill_idxs:list=None):
-        """
-        Predict skill (attribute) probabilities from pre-computed responsiblities (g).
-        Responsiblities come from the `get_posterior(X)` call.
 
-        g (nd-array): responsiblities (commonly represented as a lowercase gamma).
+    def skill_proba_from_posterior(self, g, skill_idxs:list=None):
+        """
+        Expected skill mastery from pre-computed responsibilities ``g`` (as
+        returned by :meth:`predict_proba`): ``g @ mu``.
         """
         return g @ self.get_mu_slice(skill_idxs)
 
-    def pred_skill_probas(self, X, return_post=False):
-       return self.pred_attr_probas(X, skill_idxs=None, return_post=False)
-    
-    def pred_item_probas_numba(self, X, user_idxs, item_idxs):
+    def score(self, X):
         """
-        Memory usage: O(#observations x components) NOT O(users x items)
-        
-        :param user_idxs: array of user indices
-        :param item_idxs: array of item indices (same length)
+        Mean predictive negative log-likelihood per observed response.
+
+        ``X`` is a dense 0/1 array (NaN entries are ignored) or SciPy sparse.
         """
-        import numba
+        X = np.asarray(X.todense() if not isinstance(X, np.ndarray) else X, dtype=float)
+        eps = 1e-15
+        p = np.clip(self.predict_item_proba(X), eps, 1 - eps)
+        mask = ~np.isnan(X)
+        ll = X[mask] * np.log(p[mask]) + (1 - X[mask]) * np.log(1 - p[mask])
+        return float(-ll.sum() / mask.sum())
 
-        # get user-component responsibilities
-        g = self.get_posterior(X)       # shape (n_users, n_components)
-
-        log_mu = np.log(self.mu)        # shape (n_components, n_skills)
-        log_1m_mu = np.log(1 - self.mu) 
-        log_theta = np.log(self.theta).ravel()
-        log_1m_theta = np.log(1 - self.theta).ravel()
-
-        # Access internal arrays
-        self.Q = self.Q.tocsr()
-        Q_indptr = self.Q.indptr     # shape (n_rows + 1,)
-        Q_indices = self.Q.indices   # shape (nnz,)  
-
-        # Q is CSR: shape (n_items, n_skills)
-        rows, cols = [], []
-        for i in range(self.Q.indptr.shape[0]-1):
-            for p in range(self.Q.indptr[i], self.Q.indptr[i+1]):
-                rows.append(i)
-                cols.append(self.Q.indices[p])
-        Q_rows = np.array(rows, dtype=np.int64)
-        Q_cols = np.array(cols, dtype=np.int64)  
-        Q_indptr_start = self.Q.indptr 
-
-        @numba.njit(parallel=True)
-        def compute_probs(user_idxs, item_idxs):
-            n = len(item_idxs)
-            out = np.empty(n, dtype=np.float64)
-            n_components = g.shape[1]
-
-            for j in numba.prange(n):  # parallel over user-item pairs
-                u = user_idxs[j]
-                i = item_idxs[j]
-                s1 = log_theta[i]
-                s0 = log_1m_theta[i]
-
-                # sum over all skills for this item
-                start = Q_indptr_start[i]
-                end   = Q_indptr_start[i+1]
-                for idx in range(start, end):
-                    k = Q_cols[idx]
-                    temp1 = 0.0
-                    temp0 = 0.0
-                    for c in range(n_components):
-                        temp1 += g[u, c] * log_mu[c, k]
-                        temp0 += g[u, c] * log_1m_mu[c, k]
-                    s1 += temp1
-                    s0 += temp0
-
-                out[j] = 1.0 / (1.0 + np.exp(s0 - s1))
-
-            return out
-
-        return compute_probs(user_idxs, item_idxs)
-    
-    def get_pred_nll(self, X):
+    def predict_item_proba(self, X, item_idxs:list=None):
         """
-        Compute NLL for predictive cross entropy.
-        """
-        eps = 1e-15 
-        p_j = np.clip(self.pred_item_probas(X), eps, 1 - eps)
-        log_lik = X*np.log(p_j) + (1-X)*np.log(1-p_j)
-
-        # Return average neg log lik per response
-        return -log_lik.sum() / np.prod(X.shape)
-
-    def pred_item_probas(self, X, profiles=None, item_idxs:list=None):
-        """
-        Predicts the probability of a correct response for selected items.
+        Predicted probability of a correct response.
 
         Parameters
         ----------
-        X : array-like of shape (n_datapoints, n_items)
-            Empirical item response data for the individuals being evaluated.
-
-        item_idx : list of int
-            Indices of the items for which to compute predicted probabilities.
-            If None, probabilities are returned for all items.
-
-        profiles : array-like, optional
-            Deprecated.
+        X : (n_learners, n_items) dense ndarray (NaN = missing) or SciPy sparse.
+        item_idxs : list of int, optional
+            Restrict the output to these item columns.
 
         Returns
         -------
-        np.ndarray of shape (n_datapoints, n_selected_items)
-            Predicted probabilities of a correct response for each individual–
-            item pair.
+        (n_learners, n_selected_items) ndarray in ``[0, 1]``.
         """
-        # convert dense to sparse if needed
-        if isinstance(X, np.ndarray):
-            X = self.convert_dense_to_sparse(X)
+        g = self.predict_proba(X)
+        return self._item_proba_from_resp(g, item_idxs)
 
-        g = self.get_posterior(X)
-        return self.pred_item_probas_from_resp(g, item_idxs)
-
-    def pred_item_probas_from_resp(self, post, item_idxs=None):
+    def _item_proba_from_resp(self, post, item_idxs=None):
         """
         Predict correct item response probabilities from proficiency scores (psi)
         """
@@ -431,11 +326,6 @@ class MoLA(Train):
 
         # Return mixture of sigmoids, shape (N, J_selected)
         return post @ s
-    
-    def reshape_to_row_vectors(self, x):
-        if x.ndim == 1:
-            return x.reshape(1, -1)
-        return x
 
     def sample_user_skill_posterior(self, x, mask, n_samples):
         """
@@ -451,7 +341,7 @@ class MoLA(Train):
         trace_matrix = np.zeros([n_samples, self.n_skills])
 
         # 1. for user i sample from \gamma(z_{im})
-        post = np.exp(self.get_log_posterior(x))
+        post = np.exp(self.get_log_posterior(self._prepare_X(x)))
 
         # init component indices
         components = np.arange(post.shape[1])
@@ -478,7 +368,7 @@ class MoLA(Train):
             skill_idx (int): skill index
         """
         k = skill_idx
-        post = np.exp(self.get_log_posterior(x))
+        post = np.exp(self.get_log_posterior(self._prepare_X(x)))
 
         x = np.linspace(0, 1, 100)
         pdf = np.array([beta.pdf(x, self.mu_a[m, k], self.mu_b[m, k]) for m in range(self.n_components)])
@@ -500,78 +390,16 @@ class MoLA(Train):
 
     def get_user_ability(self, X):
         """
-        Compute user latent ability.
+        Compute user latent ability, shape (n_learners, n_items).
         """
-        # (n_users, n_comps)
-        g = self.get_posterior(X)
+        g = self.predict_proba(X)
         logit_mu = logit(self.mu)
-
         return g @ logit_mu @ self.Q.T
 
-    def convert_dense_to_sparse(self, X):
-        """
-        Safely convert binary (0 and 1) Numpy array into sparse SciPy CSR.
-        """
-        X1 = X.copy()
-        X1[X1 == 0] = -1
-        X1[np.isnan(X1)] = 0
-        X1 = csr_matrix(X1)
-        X1.data = (X1.data + 1) / 2
-        return X1
-    
     def get_prior_exp_skill_prof(self, skill_idxs:list=None):
         """
-        Get the prior (before seeing data) expected
-        skill proficiency skill indexes, `skill_idxs`.
+        Prior (before seeing data) expected skill proficiency: ``pi @ mu``.
         """
         mu = self.get_mu_slice(skill_idxs)
         return (self.pi.T @ mu).flatten()
-    
-    def sample_prior_skill_prof(self, skill_idxs:list=None):
-        """
-        Sample from the prior skill proficiency.
-        """
-        if skill_idxs is not None:
-            mu = self.mu[:, skill_idxs]
-        else:
-            mu = self.mu
-            skill_idxs = np.arange(self.mu.shape[1])
-
-        pi = self.pi.flatten()
-        M = len(pi)
-
-        # Sample latent component
-        m = np.random.choice(np.arange(M), p=pi)
-        mu = mu[m, :]
-
-        # Sample proficiency (psi) from latent component
-        sample_psi = [
-            np.random.beta(a=self.mu_a[m, k], b=self.mu_b[m, k])
-            for k in skill_idxs
-        ]
-
-        return sample_psi
-    
-    def get_updated_post(self, item_idxs, x, old_unorm_post):
-        """
-        Incrementally update user posterior responbilites.
-        WARNING: update it not idempotent. Sending the same
-        request twice will update results twice.
-
-        params:
-            x (int): 0 or 1 (incorrect or correct, respectively)
-            old_gamma_bar (array-like): old user unnormalized responsibilities.
-        returns:
-            new_gamma (array-like): updated user unnormalized responsibilities. 
-        """
-        a = self.a[item_idxs, :].reshape(1, -1)
-        b = self.b[item_idxs, :].reshape(1, -1)
-
-        # Updated responsbilities
-        new_unorm_post =a**x * b**(1-x) * old_unorm_post
-        # Updated proficies
-        psi = (new_unorm_post @ self.mu).flatten()
-
-        return psi
-
 

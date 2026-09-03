@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
@@ -7,57 +9,116 @@ from tqdm import tqdm
 from scipy.special import expit
 
 
-class Train():
+class _MoLABase:
+    """
+    EM engine shared by the MoLA estimators.
 
-    def __init__(self, **kwargs):
-        # Number of skill profiles
-        self.n_components = kwargs.get('n_components', 3)
+    Not used directly -- instantiate :class:`src.mola.MoLA`, which layers the
+    posterior/predictive read-outs on top of this fitting loop.
+    """
 
-        Q_matrix = kwargs.get('Q_matrix')
-        if issparse(Q_matrix):
-            self.Q = Q_matrix.tocsr()
-        elif Q_matrix is not None:
-            self.Q = csr_matrix(Q_matrix)
-            n_j = self.Q.sum(axis=1)
-            self.Q = self.Q / n_j
-        else:
-            self.Q = None
+    _MODELS = ("MoLA-id", "MoLA-ad")
 
-        # Smoothing parameters
-        self.pi_smooth = kwargs.get('pi_smooth', 1)
-        self.mu_smooth = kwargs.get('mu_smooth', [2, 2])
-        self.theta_smooth = kwargs.get('theta_smooth', [4, 5])
+    def __init__(
+        self,
+        Q=None,
+        n_components: int = 3,
+        *,
+        max_iter: int = 50,
+        tol: float = 1e-5,
+        pseudo_likelihood: bool = False,
+        mu_prior: tuple = (2, 2),
+        theta_prior: tuple = (4, 5),
+        pi_prior: float = 1.0,
+        random_state: int | None = 746,
+        model: str = "MoLA-id",
+    ):
+        """
+        Parameters
+        ----------
+        Q : (n_items, n_skills) array or sparse matrix, optional
+            Binary item->skill map (the Q-matrix). Row-normalized on assignment,
+            so the fitted model is the compensatory ("MoLA-id") form. May be left
+            ``None`` and supplied later via :meth:`fit`.
+        n_components : int
+            Number of latent archetypes.
+        max_iter : int
+            Maximum number of EM iterations.
+        tol : float
+            Relative negative-log-likelihood change below which EM stops.
+        pseudo_likelihood : bool
+            Fit with the pseudo-likelihood M-step, which also stores the Beta
+            pseudo-counts that the posterior-sampling read-outs need.
+        mu_prior, theta_prior : (float, float)
+            ``(alpha, beta)`` of the Beta prior on the archetype profiles and on
+            item easiness.
+        pi_prior : float
+            Dirichlet concentration for the mixture weights.
+        random_state : int or None
+            Seed for parameter initialization.
+        model : {"MoLA-id", "MoLA-ad"}
+            Response function. ``"MoLA-id"`` (item difficulty) is the default.
+        """
+        if model not in self._MODELS:
+            raise ValueError(f"model must be one of {self._MODELS}, got {model!r}")
 
-        self.tol = kwargs.get('tol', 1e-5)                  # relative tolerance
-        self.nll_trace = []             # trace to track convergence
-        self.log_likelihood = None      # log likelihood
-        self.mu_trace = []              # parameter trace
-        self.n_iter = kwargs.get('n_iter', 50)            # max number of training iterations
-        self.log_post = None            # log mixture weights
+        self.n_components = n_components
+        self.Q = self._normalize_q(Q)
 
-        self.use_psuedo_likelihood = kwargs.get('use_psuedo_likelihood', False)
+        self.max_iter = max_iter
+        self.tol = tol
+        self.pseudo_likelihood = pseudo_likelihood
+        self.mu_prior = tuple(mu_prior)
+        self.theta_prior = tuple(theta_prior)
+        self.pi_prior = pi_prior
+        self.random_state = random_state
+        self.model = model
 
-        # Set model as item difficutly (id) or attribute-item difficulty (ad)
-        model=kwargs.get('model', 'MoLA-id')
-        models = ['MoLA-id', 'MoLA-ad']
-        if model in models:
-            self.model = model
-        else:
-            raise Exception(f'Model must be one of {models}.')
+        # convergence bookkeeping
+        self.nll_trace = []
+        self.log_likelihood = None
+        self.mu_trace = []
+        self.log_post = None
 
-        # Set random seed for model param initialization
-        self.random_seed = kwargs.get('random_seed', 746)
-        self.bucket = None
-
-        # Don't use a and b params during training - too memory intensive
+        # inference-time log-scale aggregates, populated lazily (see update_ab_params)
         self.a = None
         self.b = None
 
-        # These variables are obsolete
-        self.mu_a = None
-        self.mu_b = None
-        self.theta_a = None
-        self.theta_b = None
+        # Beta pseudo-counts, populated only when pseudo_likelihood is True
+        self.mu_a = self.mu_b = None
+        self.theta_a = self.theta_b = None
+
+    # ------------------------------------------------------------------ #
+    # input normalization
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_q(Q):
+        """Return ``Q`` as a row-normalized CSR float matrix (rows sum to 1)."""
+        if Q is None:
+            return None
+        Q = csr_matrix(Q, dtype=float)
+        row_sums = np.asarray(Q.sum(axis=1)).ravel()
+        row_sums[row_sums == 0] = 1.0
+        return Q.multiply(1.0 / row_sums[:, None]).tocsr()
+
+    def _prepare_X(self, X):
+        """Accept a dense ndarray (NaN = missing) or a SciPy sparse matrix."""
+        if isinstance(X, np.ndarray):
+            return self._to_sparse(X)
+        return X
+
+    def _to_sparse(self, X):
+        """
+        Convert a dense binary (0/1, NaN = missing) array to the internal CSR
+        encoding: observed responses are stored as 0/1, missing entries are
+        structural zeros.
+        """
+        X1 = X.copy()
+        X1[X1 == 0] = -1
+        X1[np.isnan(X1)] = 0
+        X1 = csr_matrix(X1)
+        X1.data = (X1.data + 1) / 2
+        return X1
 
     def _init_mu(self, n_skills, n_components):
         """
@@ -96,9 +157,9 @@ class Train():
         self.n_items, self.n_skills = self.Q.shape
 
         # init model params
-        if self.random_seed:
+        if self.random_state:
             # set seed
-            np.random.seed(self.random_seed)
+            np.random.seed(self.random_state)
 
         self.mu = self._init_mu(self.n_skills, n_components)
         self.theta = self._init_theta(self.n_items)
@@ -121,7 +182,7 @@ class Train():
             'mu': self.mu,
             'theta': self.theta,
             'pi': self.pi,
-            'Q_matrix': self.Q
+            'Q': self.Q,
         }
     
     def get_param_count(self):
@@ -236,7 +297,7 @@ class Train():
         # update iter counter
         self.i += 1
         # check max EM iterations criteria 
-        if self.i > self.n_iter - 1:
+        if self.i > self.max_iter - 1:
             self.stop = True
 
         # # check parameter convergence
@@ -275,8 +336,8 @@ class Train():
         Calculate negative log likelihood p(x). Update log likeihood p(x | z).
         """
         # add beta priors?
-        # nll -= (self.mu_smooth[0] * np.log(self.mu)).sum().sum()
-        # nll -= (self.mu_smooth[1] * np.log(1 - self.mu)).sum().sum()
+        # nll -= (self.mu_prior[0] * np.log(self.mu)).sum().sum()
+        # nll -= (self.mu_prior[1] * np.log(1 - self.mu)).sum().sum()
 
         # self.log_likelihood has shape (n_samples, n_components)
         # and self.pi has shape (n_components,)
@@ -352,7 +413,7 @@ class Train():
         """
         # convert dense to sparse if needed
         if isinstance(X, np.ndarray):
-            X = self.convert_dense_to_sparse(X)
+            X = self._to_sparse(X)
 
         # X1 and X2 are item response and inverse item response datum
         self._init_fit()
@@ -411,7 +472,7 @@ class Train():
             # Subtract from the data terms
             # (N, M) - (M,) broadcasts correctly across the N dimension
             log_likelihood = L1 + L2 # - log_norm_sample
-            if not self.use_psuedo_likelihood:
+            if not self.pseudo_likelihood:
                 # log_P_norm is (J, M)
                 # X1 and X2 are (N, J)
                 obs_mask = X1 + X2  # Shape (N, J)
@@ -461,13 +522,13 @@ class Train():
     def update_model_params(self, I_mk, R_mk, I_jm, R_jm, I_m, R_m):
 
         # Update Prior component assignment
-        self.pi = (I_m + self.pi_smooth) / (R_m + self.pi_smooth*I_m.shape[0])
+        self.pi = (I_m + self.pi_prior) / (R_m + self.pi_prior*I_m.shape[0])
         # Update other parameters (psuedo-likelihood)
-        if self.use_psuedo_likelihood:
+        if self.pseudo_likelihood:
             
             # Unpack beta priors 
-            mu_a, mu_b = self.mu_smooth
-            theta_a, theta_b = self.theta_smooth
+            mu_a, mu_b = self.mu_prior
+            theta_a, theta_b = self.theta_prior
 
             I_j = I_jm.sum(axis=1).reshape(-1, 1)
             R_j = R_jm.sum(axis=1).reshape(-1, 1)
@@ -533,7 +594,7 @@ class Train():
         # Since beta is item-specific, we need an item-specific mu reference
         # mu_avg could be the average mu across skills for that item: (Q_prop @ mu.T)
         # Add priors
-        a, b = self.theta_smooth
+        a, b = self.theta_prior
 
         # B_matrix = 0
 
@@ -594,7 +655,7 @@ class Train():
 
         # 4. Solve the Quadratic Equation: 
         # Coefficients: a*x^2 + b*x + c = 0
-        a, b = self.mu_smooth
+        a, b = self.mu_prior
 
         A = B_matrix
         B = -(B_matrix + (R_mk + a + b))
@@ -627,7 +688,7 @@ class Train():
 
         # 4. Solve the Quadratic Equation: 
         # Coefficients: a*x^2 + b*x + c = 0
-        a, b = self.mu_smooth
+        a, b = self.mu_prior
 
         A = B_matrix
         B = -(B_matrix + (R_mk + a + b))
@@ -662,7 +723,7 @@ class Train():
         R_j = R_jm.sum(axis=1).reshape(-1, 1)
         I_j = I_jm.sum(axis=1).reshape(-1, 1)
 
-        a, b = self.theta_smooth
+        a, b = self.theta_prior
 
         A = B_matrix
         B = -(B_matrix + (R_j + a + b))
@@ -694,12 +755,12 @@ class Train():
         self.theta = np.clip(new_theta, 1e-10, 1 - 1e-10)
 
     def update_pi_from_stats(self, R_m, I_m):
-        self.pi = (I_m + self.pi_smooth) / (R_m + self.pi_smooth*I_m.shape[0])
+        self.pi = (I_m + self.pi_prior) / (R_m + self.pi_prior*I_m.shape[0])
     
     def update_model_params_incrementally(self, I1, R1, I2, R2, I3, R3):
         # Unpack beta priors 
-        mu_a, mu_b = self.mu_smooth
-        theta_a, theta_b = self.theta_smooth
+        mu_a, mu_b = self.mu_prior
+        theta_a, theta_b = self.theta_prior
 
         # Store pseudo correct, incorrect counts
         self.mu_a, self.mu_b = mu_a + I1, mu_b + R1 - I1
@@ -708,7 +769,7 @@ class Train():
         # Update parameters incrementally
         self.mu = self.mu_a / (self.mu_a + self.mu_b)
         self.theta = self.theta_a / (self.theta_a + self.theta_b)
-        self.pi = (I3 + self.pi_smooth) / (R3 + self.pi_smooth*I3.shape[0])
+        self.pi = (I3 + self.pi_prior) / (R3 + self.pi_prior*I3.shape[0])
 
         # # update aggregate params
         # self.update_ab_params()
@@ -994,16 +1055,3 @@ class Train():
 
         # create sparse binary matrix
         return csr_matrix((values, (rows, cols)), shape=shape)
-
-    def config_model(self, **config):
-        """
-        Configure model parameters.
-        """
-        self.n_components = config.get('n_components', 1000)
-        self.mu_smooth = config.get('mu_smooth', [2, 2])
-        self.theta_smooth = config.get('theta_smooth', [2, 2])
-        self.pi_smooth = config.get('pi_smooth', 1)
-        self.tol = config.get('tol', 1e-4)
-        self.n_iter = config.get('n_iter', 500)
-        self.use_psuedo_likelihood = config.get('use_psuedo_likelihood', True)
-       

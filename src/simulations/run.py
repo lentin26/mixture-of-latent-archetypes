@@ -140,15 +140,15 @@ def fit_mola(
 ) -> MoLAWithInit:
     mu_init, theta_init, pi_init = _initial_params(data, X_train, rng)
     params = {
-        "Q_matrix": data.Q_fit,
+        "Q": data.Q_fit,
         "n_components": data.condition.n_archetypes,
-        "mu_smooth": [2, 2],
-        "theta_smooth": [2, 2],
-        "pi_smooth": 2,
+        "mu_prior": (2, 2),
+        "theta_prior": (2, 2),
+        "pi_prior": 2,
         "tol": 1e-5,
-        "n_iter": data.condition.n_iter,
-        "use_psuedo_likelihood": False,
-        "random_seed": int(rng.integers(0, 2**31 - 1)),
+        "max_iter": data.condition.n_iter,
+        "pseudo_likelihood": False,
+        "random_state": int(rng.integers(0, 2**31 - 1)),
     }
     params.update(data.condition.fit_kwargs)
     model = MoLAWithInit(
@@ -181,10 +181,10 @@ def run_condition(
 
     k = min(data.mu.shape[1], model.mu.shape[1])
     perm = align_components(data.mu[:, :k], model.mu[:, :k])
-    post = model.get_posterior(model.convert_dense_to_sparse(X_train))
+    post = model.predict_proba(X_train)
 
     y_true = data.X[hold_mask]
-    y_prob = model.pred_item_probas(X_train)[hold_mask]
+    y_prob = model.predict_item_proba(X_train)[hold_mask]
 
     metrics = {
         **condition.to_dict(),
