@@ -1,12 +1,13 @@
 
+import tempfile
+import requests
+
 try:
     import pyreadr
-    import requests
-    import tempfile
-except Exception as e:
-    print(e)
-
+except ImportError:
+    pyreadr = None
 # Helper function to retrieve data from Github
+
 def download_frac_subtr_to_pandas(file_name):
 
     valid_file_names = ["fraction.subtraction.data", "fraction.subtraction.qmatrix"]
