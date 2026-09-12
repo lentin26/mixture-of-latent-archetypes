@@ -159,6 +159,40 @@ straight line. Plotted with a linear y-axis instead, genuinely linear cost
 bends upward and can look quadratic or exponential — a straight line under
 log-x/linear-y actually corresponds to *logarithmic* growth, not linear.
 
+### Publication-quality figures
+
+`src/style.py` is a standalone module (no dependency on `src.mola` or
+`src.simulations`) for figures headed into a LaTeX paper: print-legible
+fonts/line weights, vector-safe embedded text (`pdf.fonttype=42`, so text
+stays real/searchable rather than a bitmap), and no dependency on a local
+LaTeX toolchain (`text.usetex` stays `False`; a Computer-Modern-like serif
+font plus Matplotlib's `cm` mathtext set gets visually close to real LaTeX
+text without it).
+
+```python
+from src.style import apply, figsize
+
+apply()  # every figure created for the rest of the session picks this up
+fig = plot_component_recovery(result, figsize=figsize("acm-sigconf-text", aspect=0.32))
+fig.savefig("figures/component_recovery.pdf")
+```
+
+`figsize(width, fraction=1.0, aspect=0.68)` sizes a figure in inches to
+exactly fill a fraction of a LaTeX column/text width, so `\includegraphics`
+doesn't rescale it (rescaling blurs text and distorts line weights relative
+to the surrounding body text). `width` is a raw point value or a key into
+`COLUMN_WIDTHS_PT` (a few common document classes, defaulting to
+`acmart`'s `sigconf` layout); get the exact number for your own document
+with `\typeout{\the\columnwidth}` (or `\the\textwidth`) next to a figure and
+reading it from the compiled `.log`. Use `publication_style()` as a context
+manager instead of `apply()` to scope the styling to only some figures in a
+session, and `strip_titles(fig)` to drop the descriptive `fig.suptitle(...)`
+some `viz.py` plots add (a submission figure's caption lives in the LaTeX
+source, not baked into the image).
+
+`notebooks/simulation-study.ipynb` applies this to all five experiment
+figures.
+
 ## Tests
 
 ```bash
@@ -177,3 +211,5 @@ seconds.
 `tests/test_viz.py` covers the component-recovery plots and the five-experiment
 study's plots (`plot_component_recovery_distribution`, `plot_ofat_sensitivity`,
 `plot_m_sensitivity`), headless (Agg backend).
+`tests/test_style.py` covers `figsize`, `publication_style` / `apply`, and
+`strip_titles`.
