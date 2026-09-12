@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -126,8 +126,16 @@ def _initial_params(
     data: SimulatedDataset, X_train: np.ndarray, rng: np.random.Generator
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     init = data.condition.initialization
-    n_components = data.condition.n_archetypes
+    n_components = data.condition.resolved_n_components_fit()
     n_skills = data.Q_fit.shape[1]
+    if init != "random" and n_components != data.condition.n_archetypes:
+        raise ValueError(
+            f"initialization={init!r} assumes the correct number of archetypes "
+            f"(it seeds from the true mu/pi/theta), but this condition fits "
+            f"n_components={n_components} against a true n_archetypes="
+            f"{data.condition.n_archetypes}. Use initialization='random' when "
+            f"n_components_fit misspecifies the number of archetypes."
+        )
     if init == "random":
         return None, None, None
     if init == "k-means":
@@ -141,7 +149,7 @@ def fit_mola(
     mu_init, theta_init, pi_init = _initial_params(data, X_train, rng)
     params = {
         "Q": data.Q_fit,
-        "n_components": data.condition.n_archetypes,
+        "n_components": data.condition.resolved_n_components_fit(),
         "mu_prior": (2, 2),
         "theta_prior": (2, 2),
         "pi_prior": 2,
@@ -165,6 +173,39 @@ class SimulationResult:
     data: SimulatedDataset
 
 
+def _score_fit(
+    data: SimulatedDataset,
+    model: MoLAWithInit,
+    X_train: np.ndarray,
+    hold_mask: np.ndarray,
+    seed: int,
+    train_time: float,
+) -> dict:
+    """Recovery + predictive metrics for one fit of `model` against `data`."""
+    k = min(data.mu.shape[1], model.mu.shape[1])
+    perm = align_components(data.mu[:, :k], model.mu[:, :k])
+    post = model.predict_proba(X_train)
+
+    y_true = data.X[hold_mask]
+    y_prob = model.predict_item_proba(X_train)[hold_mask]
+
+    return {
+        **data.condition.to_dict(),
+        "seed": seed,
+        "mu_rmse": mu_rmse(data.mu, model.mu),
+        "pi_mae": pi_mae(data.pi, model.pi, perm),
+        "theta_rmse": theta_rmse(data.theta, model.theta),
+        "assignment_ari": assignment_ari(data.z, post, perm),
+        "holdout_auc": masked_auc(y_true, y_prob),
+        "holdout_brier": brier_score(y_true, y_prob),
+        "holdout_nll": masked_nll(y_true, y_prob),
+        "n_em_iters": len(model.nll_trace),
+        "final_nll": float(model.nll_trace[-1]) if model.nll_trace else float("nan"),
+        "train_time_sec": train_time,
+        "n_observations": int((~np.isnan(data.X)).sum()),
+    }
+
+
 def run_condition(
     condition: SimulationCondition,
     seed: int | None = None,
@@ -179,31 +220,65 @@ def run_condition(
     model = fit_mola(data, X_train, rng)
     train_time = time.perf_counter() - t0
 
-    k = min(data.mu.shape[1], model.mu.shape[1])
-    perm = align_components(data.mu[:, :k], model.mu[:, :k])
-    post = model.predict_proba(X_train)
-
-    y_true = data.X[hold_mask]
-    y_prob = model.predict_item_proba(X_train)[hold_mask]
-
-    metrics = {
-        **condition.to_dict(),
-        "seed": seed,
-        "mu_rmse": mu_rmse(data.mu, model.mu),
-        "pi_mae": pi_mae(data.pi, model.pi, perm),
-        "theta_rmse": theta_rmse(data.theta, model.theta),
-        "assignment_ari": assignment_ari(data.z, post, perm),
-        "holdout_auc": masked_auc(y_true, y_prob),
-        "holdout_brier": brier_score(y_true, y_prob),
-        "holdout_nll": masked_nll(y_true, y_prob),
-        "n_em_iters": len(model.nll_trace),
-        "final_nll": float(model.nll_trace[-1]) if model.nll_trace else float("nan"),
-        "train_time_sec": train_time,
-        "n_observations": int((~np.isnan(data.X)).sum()),
-    }
+    metrics = _score_fit(data, model, X_train, hold_mask, seed, train_time)
     if return_fit:
         return SimulationResult(metrics=metrics, model=model, data=data)
     return metrics
+
+
+def run_init_repeats(
+    condition: SimulationCondition,
+    data_seed: int,
+    n_repeats: int,
+    base_init_seed: int = 0,
+) -> list[SimulationResult]:
+    """Fit ONE simulated dataset `n_repeats` times, varying only the EM
+    initialization draw -- isolates robustness to initialization from sampling
+    noise (see notebooks/simulation-study.ipynb, "Estimation Stability").
+
+    `condition.initialization` should be "random": k-means/informed inits
+    derive from the data/true parameters, so repeating them mostly re-measures
+    a different RNG's seed, not MoLA's own sensitivity to where EM starts. The
+    train/holdout split is also fixed once, so the only thing that changes
+    between repeats is where EM starts.
+    """
+    data = generate_dataset(condition, seed=data_seed)
+    split_rng = np.random.default_rng(data_seed)
+    X_train, hold_mask = split_holdout(data.X, condition.holdout_frac, split_rng)
+
+    results = []
+    for i in range(n_repeats):
+        init_seed = base_init_seed + i
+        rng = np.random.default_rng(init_seed)
+        t0 = time.perf_counter()
+        model = fit_mola(data, X_train, rng)
+        train_time = time.perf_counter() - t0
+        metrics = _score_fit(data, model, X_train, hold_mask, init_seed, train_time)
+        results.append(SimulationResult(metrics=metrics, model=model, data=data))
+    return results
+
+
+def run_m_sweep(
+    condition: SimulationCondition,
+    n_components_grid: list[int],
+    seed: int = 0,
+) -> list[SimulationResult]:
+    """Fit the SAME simulated data with a range of `n_components_fit` values,
+    to see how recovery/predictive quality and archetype redundancy respond to
+    misspecifying the number of archetypes (see notebooks/simulation-study.ipynb,
+    "Sensitivity to the Number of Archetypes").
+
+    `generate_dataset` and `split_holdout` don't depend on `n_components_fit`,
+    so passing the same `seed` for every grid point holds the true data and the
+    train/holdout split fixed -- only the fitted `n_components` changes. Forces
+    `initialization="random"` (see the validation guard in `_initial_params`;
+    k-means/informed inits assume the correct number of archetypes).
+    """
+    results = []
+    for m in n_components_grid:
+        cond = replace(condition, n_components_fit=m, initialization="random")
+        results.append(run_condition(cond, seed=seed, return_fit=True))
+    return results
 
 
 def run_design(

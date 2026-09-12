@@ -22,7 +22,13 @@ from src.simulations.factors import (
     ofat_design,
     replicate_seeds,
 )
-from src.simulations.run import run_condition, run_design, summarize_results
+from src.simulations.run import (
+    run_condition,
+    run_design,
+    run_init_repeats,
+    run_m_sweep,
+    summarize_results,
+)
 
 # A deliberately tiny condition so the full fit path runs in a fraction of a second.
 SMALL = SimulationCondition(
@@ -84,6 +90,18 @@ def test_replicate_seeds_are_distinct_and_deterministic():
     assert len(seeds) == len(set(seeds)) == 5
     assert replicate_seeds(0, 5) == seeds
     assert replicate_seeds(7, 3)[0] == 7
+
+
+def test_condition_id_unaffected_by_correctly_specified_n_components_fit():
+    explicit = SimulationCondition(**{**SMALL.__dict__, "n_components_fit": SMALL.n_archetypes})
+    assert explicit.condition_id() == SMALL.condition_id()
+    assert explicit.resolved_n_components_fit() == SMALL.n_archetypes
+
+
+def test_condition_id_reflects_misspecified_n_components_fit():
+    misspecified = SimulationCondition(**{**SMALL.__dict__, "n_components_fit": SMALL.n_archetypes + 2})
+    assert misspecified.condition_id() != SMALL.condition_id()
+    assert misspecified.resolved_n_components_fit() == SMALL.n_archetypes + 2
 
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +202,42 @@ def test_summarize_results_aggregates_by_condition():
         assert f"{metric}_mean" in summary.columns
         assert f"{metric}_std" in summary.columns
         assert summary[f"{metric}_n"].iloc[0] == 3
+
+
+def test_kmeans_init_rejects_misspecified_n_components_fit():
+    misspecified = SimulationCondition(
+        **{**SMALL.__dict__, "initialization": "k-means", "n_components_fit": SMALL.n_archetypes + 1}
+    )
+    with pytest.raises(ValueError, match="initialization='k-means'"):
+        run_condition(misspecified, seed=0)
+
+
+def test_run_init_repeats_holds_data_fixed_and_varies_only_init():
+    random_only = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
+    results = run_init_repeats(random_only, data_seed=0, n_repeats=4)
+
+    assert len(results) == 4
+    # every repeat shares the exact same simulated dataset...
+    assert all(r.data is results[0].data for r in results)
+    # ...and the same condition, so the same condition_id.
+    assert {r.metrics["condition_id"] for r in results} == {random_only.condition_id()}
+    for r in results:
+        assert r.model.mu.shape == (random_only.n_archetypes, random_only.n_skills)
+
+
+def test_run_m_sweep_varies_fitted_m_holding_data_fixed():
+    grid = [1, 2, 3]
+    results = run_m_sweep(SMALL, n_components_grid=grid, seed=0)
+
+    assert [r.model.mu.shape[0] for r in results] == grid
+    assert [r.metrics["n_components_fit"] for r in results] == grid
+    # the underlying simulated data shouldn't change with n_components_fit
+    x0 = np.nan_to_num(results[0].data.X, nan=-1.0)
+    for r in results[1:]:
+        np.testing.assert_array_equal(np.nan_to_num(r.data.X, nan=-1.0), x0)
+    # a correctly-specified grid point matches the plain condition_id
+    baseline_ix = grid.index(SMALL.n_archetypes)
+    assert results[baseline_ix].metrics["condition_id"] == SMALL.condition_id()
 
 
 # --------------------------------------------------------------------------- #

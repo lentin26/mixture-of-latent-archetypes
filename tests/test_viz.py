@@ -15,12 +15,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from src.simulations.factors import SimulationCondition
-from src.simulations.run import run_condition
+from src.simulations.factors import SimulationCondition, ofat_design
+from src.simulations.run import run_condition, run_design, run_init_repeats, run_m_sweep
 from src.simulations.viz import (
     align_recovered_components,
     plot_component_recovery,
+    plot_component_recovery_distribution,
     plot_components,
+    plot_m_sensitivity,
+    plot_ofat_sensitivity,
     plot_recovery_scatter,
 )
 
@@ -130,3 +133,79 @@ def test_recovery_from_simulation_result():
     assert len([ax for ax in fig.axes if ax.get_visible()]) == 2
     # titles carry the pi_true -> pi_est annotation when a result is passed
     assert "pi" in [ax for ax in fig.axes if ax.get_visible()][0].get_title()
+
+
+# --------------------------------------------------------------------------- #
+# plot_component_recovery_distribution (Estimation Stability)
+# --------------------------------------------------------------------------- #
+SMALL_VIZ = SimulationCondition(
+    n_archetypes=2, n_learners=150, responses_per_learner=8, n_skills=4, n_iter=5,
+    initialization="random",
+)
+
+
+def test_recovery_distribution_from_arrays_has_one_panel_per_component():
+    # 5 repeats: MU_TRUE with independent noise + row shuffles, standing in for
+    # 5 different EM initializations recovering the same true components.
+    mu_ests = [
+        np.clip(MU_TRUE[RNG.permutation(3)] + RNG.normal(0, 0.03, size=MU_TRUE.shape), 0.01, 0.99)
+        for _ in range(5)
+    ]
+    fig = plot_component_recovery_distribution(mu_true=MU_TRUE, mu_ests=mu_ests)
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 3
+    # 5 thin repeat lines + 1 bold median + 1 assumed line, per panel
+    assert len(visible[0].get_lines()) == 7
+
+
+def test_recovery_distribution_requires_arrays_or_results():
+    with pytest.raises(ValueError):
+        plot_component_recovery_distribution()
+
+
+def test_recovery_distribution_from_run_init_repeats():
+    results = run_init_repeats(SMALL_VIZ, data_seed=0, n_repeats=4)
+    fig = plot_component_recovery_distribution(results)
+    assert len([ax for ax in fig.axes if ax.get_visible()]) == SMALL_VIZ.n_archetypes
+
+
+# --------------------------------------------------------------------------- #
+# plot_ofat_sensitivity (Robustness to Data Sparsity / Computational Scalability)
+# --------------------------------------------------------------------------- #
+def test_ofat_sensitivity_one_panel_per_factor_numeric_and_categorical():
+    conditions = ofat_design(
+        baseline=SMALL_VIZ, factors=["n_learners", "archetype_separation"]
+    )
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    fig = plot_ofat_sensitivity(
+        results,
+        factors=["n_learners", "archetype_separation"],
+        metric="mu_rmse",
+        baseline=SMALL_VIZ,
+        log_x=True,
+    )
+    assert len([ax for ax in fig.axes if ax.get_visible()]) == 2
+
+
+def test_ofat_sensitivity_can_plot_train_time_for_scalability():
+    conditions = ofat_design(baseline=SMALL_VIZ, factors=["n_learners"])
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="train_time_sec", baseline=SMALL_VIZ,
+    )
+    assert len([ax for ax in fig.axes if ax.get_visible()]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# plot_m_sensitivity (Sensitivity to the Number of Archetypes)
+# --------------------------------------------------------------------------- #
+def test_m_sensitivity_one_panel_per_metric():
+    results = run_m_sweep(SMALL_VIZ, n_components_grid=[1, 2, 3], seed=0)
+    fig = plot_m_sensitivity(
+        results,
+        true_n_archetypes=SMALL_VIZ.n_archetypes,
+        metrics=("mu_rmse", "effective_n_archetypes"),
+    )
+    assert len([ax for ax in fig.axes if ax.get_visible()]) == 2

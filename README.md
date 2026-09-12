@@ -122,6 +122,38 @@ plot_component_recovery(result, layout="overlay")                       # all on
 Also available: `plot_components(mu, ...)` for a single set of profiles, and
 `plot_recovery_scatter(result)` for a recovered-vs-assumed diagonal plot.
 
+### Five-experiment simulation study
+
+`notebooks/simulation-study.ipynb` runs five experiments, each isolating one
+claim about MoLA's archetype recovery (each needs a different axis held fixed
+and a different axis varied, which is why they're separate rather than one
+combined sweep):
+
+1. **Archetype Recovery** — does MoLA recover the generating structure at
+   all? `run_condition(..., return_fit=True)` + `plot_component_recovery` /
+   `plot_recovery_scatter`.
+2. **Estimation Stability** — does the solution depend on arbitrary
+   initialization? `run_init_repeats` fixes one simulated dataset and its
+   train/holdout split, then re-fits it many times varying only the EM
+   initialization draw; `plot_component_recovery_distribution` shows the
+   spread of recovered archetypes across those repeats.
+3. **Robustness to Data Sparsity** — does recovery degrade gracefully as
+   users (`n_learners`) or responses-per-user (`responses_per_learner`)
+   shrink? `ofat_design` + `run_design` + `plot_ofat_sensitivity`.
+4. **Sensitivity to the Number of Archetypes** — what happens when the fitted
+   `n_components` doesn't match the true `n_archetypes`? `run_m_sweep` fits
+   the same data across a grid of `n_components_fit` values;
+   `plot_m_sensitivity` also reports `MoLA.effective_n_archetypes()` per fit,
+   which should saturate near the true count even when over-specified.
+5. **Computational Scalability** — how does fit time grow with problem size?
+   The same `ofat_design` + `run_design` machinery as (3), plotted with
+   `plot_ofat_sensitivity(..., metric="train_time_sec")`.
+
+`plot_ofat_sensitivity` takes the **per-run** table from `run_design`
+directly, not `summarize_results`'s aggregated output (which drops the
+per-condition factor columns the sensitivity plot needs) — it computes the
+mean/std per factor level itself.
+
 ## Tests
 
 ```bash
@@ -133,6 +165,10 @@ pytest tests/ -q
 stability/stopping checks, and the posterior, predictive and
 psi/difficulty/redundancy read-outs, all on a tiny fit.
 `tests/test_simulations.py` covers the design grid, the data-generating process,
-`run_condition` / `run_design` / `summarize_results`, and the CLI wiring, all on a
-tiny simulation condition so the suite finishes in a few seconds.
-`tests/test_viz.py` covers the component-recovery plots (headless, Agg backend).
+`run_condition` / `run_design` / `summarize_results` / `run_init_repeats` /
+`run_m_sweep`, the `n_components_fit` misspecification validation, and the CLI
+wiring, all on a tiny simulation condition so the suite finishes in a few
+seconds.
+`tests/test_viz.py` covers the component-recovery plots and the five-experiment
+study's plots (`plot_component_recovery_distribution`, `plot_ofat_sensitivity`,
+`plot_m_sensitivity`), headless (Agg backend).

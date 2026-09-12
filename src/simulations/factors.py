@@ -68,14 +68,21 @@ class SimulationCondition:
     n_iter: int = 50
     holdout_frac: float = 0.2
     fit_kwargs: dict = field(default_factory=dict)
+    # Number of components MoLA is fit with, when deliberately different from
+    # n_archetypes (the true generating count). None => correctly specified.
+    n_components_fit: int | None = None
 
     def resolved_n_items(self) -> int:
         if self.n_items is not None:
             return self.n_items
         return int(max(2 * self.responses_per_learner, 3 * self.n_skills, 40))
 
+    def resolved_n_components_fit(self) -> int:
+        """Number of components MoLA is actually fit with."""
+        return self.n_archetypes if self.n_components_fit is None else self.n_components_fit
+
     def condition_id(self) -> str:
-        return (
+        base = (
             f"M{self.n_archetypes}"
             f"_N{self.n_learners}"
             f"_R{self.responses_per_learner}"
@@ -88,6 +95,10 @@ class SimulationCondition:
             f"_spec-{self.model_specification}"
             f"_resp-{self.response_function}"
         )
+        m_fit = self.resolved_n_components_fit()
+        if m_fit != self.n_archetypes:
+            base += f"_Mfit{m_fit}"
+        return base
 
     def to_dict(self) -> dict:
         payload = asdict(self)

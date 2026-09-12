@@ -30,6 +30,8 @@ from src.simulations.run import (
     SimulationResult,
     run_condition,
     run_design,
+    run_init_repeats,
+    run_m_sweep,
     summarize_results,
 )
 
@@ -58,5 +60,7 @@ __all__ = [
     "replicate_seeds",
     "run_condition",
     "run_design",
+    "run_init_repeats",
+    "run_m_sweep",
     "summarize_results",
 ]
