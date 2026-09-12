@@ -43,6 +43,23 @@ def _as_matrix(mu) -> np.ndarray:
     return np.asarray(mu, dtype=float)
 
 
+def _savefig(fig, save: str | Path) -> None:
+    """Save ``fig`` to ``save``, creating the parent directory if needed.
+
+    Matplotlib's own ``savefig`` raises ``FileNotFoundError`` if the target
+    directory doesn't exist yet -- e.g. a notebook kernel whose working
+    directory ended up somewhere other than the repo root (a restarted
+    kernel that skipped the ``%cd ..`` cell, say) will resolve a relative
+    path like "figures/plot.pdf" against the wrong place. Creating the
+    directory here turns that into "it just works" instead of a crash; it
+    does not fix a wrong working directory, so if the file lands somewhere
+    unexpected, check `Path.cwd()`.
+    """
+    path = Path(save)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, bbox_inches="tight")
+
+
 def align_recovered_components(
     mu_true, mu_est
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
@@ -173,7 +190,7 @@ def plot_component_recovery(
         ax.legend(fontsize=8)
         fig.tight_layout()
         if save is not None:
-            fig.savefig(save, bbox_inches="tight")
+            _savefig(fig, save)
         return fig
 
     if layout != "grid":
@@ -210,7 +227,7 @@ def plot_component_recovery(
     fig.suptitle("Assumed vs. recovered components", fontsize=12)
     fig.tight_layout()
     if save is not None:
-        fig.savefig(save, bbox_inches="tight")
+        _savefig(fig, save)
     return fig
 
 
@@ -252,7 +269,7 @@ def plot_recovery_scatter(
     ax.grid(alpha=0.3, linewidth=0.6)
     ax.legend(fontsize=8)
     if save is not None:
-        ax.figure.savefig(save, bbox_inches="tight")
+        _savefig(ax.figure, save)
     return ax
 
 
@@ -328,7 +345,7 @@ def plot_component_recovery_distribution(
     fig.suptitle("Recovered-component distribution across repeated fits", fontsize=12)
     fig.tight_layout()
     if save is not None:
-        fig.savefig(save, bbox_inches="tight")
+        _savefig(fig, save)
     return fig
 
 
@@ -378,7 +395,7 @@ def plot_ofat_sensitivity(
     fig, axes = plt.subplots(
         nrows, ncols,
         figsize=figsize or (3.6 * ncols, 3.0 * nrows),
-        squeeze=False, sharey=True,
+        squeeze=False, sharey=False,
     )
     flat = axes.ravel()
     for idx, factor in enumerate(factors):
@@ -426,7 +443,7 @@ def plot_ofat_sensitivity(
     fig.suptitle(f"OFAT sensitivity: {metric}", fontsize=12)
     fig.tight_layout()
     if save is not None:
-        fig.savefig(save, bbox_inches="tight")
+        _savefig(fig, save)
     return fig
 
 
@@ -473,5 +490,5 @@ def plot_m_sensitivity(
     fig.suptitle("Sensitivity to the number of archetypes", fontsize=12)
     fig.tight_layout()
     if save is not None:
-        fig.savefig(save, bbox_inches="tight")
+        _savefig(fig, save)
     return fig
