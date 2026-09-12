@@ -28,9 +28,10 @@ def get_y_proba_and_true(model, X_df):
     mask = np.random.rand(*X_masked.shape) < 0.2
     X_masked[mask] = np.nan # Set some values to NA
     
-    # 2. Get posteriors based ONLY on the non-masked items
-    # Your model.pred_item_probas(X_masked) must handle NAs internally
-    y_proba_all = model.pred_item_probas(X_masked)
+    # 2. Get posteriors based ONLY on the non-masked items (must handle NAs internally).
+    # MoLA exposes predict_item_proba; the CDM wrappers still use pred_item_probas.
+    predict_item = getattr(model, "predict_item_proba", None) or model.pred_item_probas
+    y_proba_all = predict_item(X_masked)
     
     # 3. Only pull the probabilities for the items that were hidden
     y_proba = y_proba_all[mask]
@@ -114,14 +115,14 @@ def fit_mola(splits, Q_df):
 
         # Configure model parameters
         model_params = {
-            'Q_matrix': Q_matrix,
+            'Q': Q_matrix,
             'n_components': 6,
-            'mu_smooth': [2, 2],
-            'theta_smooth': [2, 2],
-            'pi_smooth': 2,
+            'mu_prior': (2, 2),
+            'theta_prior': (2, 2),
+            'pi_prior': 2,
             'tol': 1e-5,
-            'n_iter': 50,
-            'use_psuedo_likelihood': False
+            'max_iter': 50,
+            'pseudo_likelihood': False,
         }
 
         # Instantiate the model
@@ -146,8 +147,8 @@ def fit_mola(splits, Q_df):
         brier_trains.append(get_brier_score(y_proba_train, y_true_train))
 
         # NLL scores
-        nll_trains.append(model.get_pred_nll(X_train))
-        nll_tests.append(model.get_pred_nll(X_test))
+        nll_trains.append(model.score(X_train))
+        nll_tests.append(model.score(X_test))
 
     result = {
         "model": "MoLA",
