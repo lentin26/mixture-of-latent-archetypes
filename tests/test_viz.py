@@ -198,6 +198,19 @@ def test_ofat_sensitivity_can_plot_train_time_for_scalability():
     assert len([ax for ax in fig.axes if ax.get_visible()]) == 1
 
 
+def test_ofat_sensitivity_log_y_sets_log_yscale():
+    conditions = ofat_design(baseline=SMALL_VIZ, factors=["n_learners"])
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="train_time_sec", baseline=SMALL_VIZ,
+        log_x=True, log_y=True,
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    assert ax.get_xscale() == "log"
+    assert ax.get_yscale() == "log"
+
+
 # --------------------------------------------------------------------------- #
 # plot_m_sensitivity (Sensitivity to the Number of Archetypes)
 # --------------------------------------------------------------------------- #

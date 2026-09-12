@@ -338,6 +338,7 @@ def plot_ofat_sensitivity(
     metric: str = "mu_rmse",
     baseline: SimulationCondition = BASELINE,
     log_x: bool = False,
+    log_y: bool = False,
     max_cols: int = 4,
     figsize: tuple[float, float] | None = None,
     save: str | Path | None = None,
@@ -358,6 +359,15 @@ def plot_ofat_sensitivity(
     dotted vertical line. Numeric factors plot on their real values (so
     ``log_x=True`` log-scales panels with wide ranges, e.g. n_learners
     spanning 500-50,000); non-numeric factors plot on categorical positions.
+
+    ``log_y=True`` additionally log-scales the (shared) y-axis. Use
+    ``log_x=log_y=True`` together when checking a scaling law (e.g.
+    ``train_time_sec`` vs. problem size): on log-log axes a power law
+    ``y ~ x**p`` is a straight line of slope ``p``, so linear cost (``p=1``)
+    reads as a straight line -- plotted with ``log_x`` alone (linear y),
+    genuinely linear cost bends upward and can look quadratic or exponential,
+    since a straight line under log-x/linear-y actually corresponds to
+    *logarithmic* growth, not linear.
     Returns the :class:`matplotlib.figure.Figure`.
     """
     factors = list(factors) if factors is not None else sorted(FACTOR_LEVELS)
@@ -396,6 +406,8 @@ def plot_ofat_sensitivity(
             # matplotlib's automatic log-scale minor ticks would otherwise
             # collide with them when levels are closely spaced (e.g. 2,4,8,16).
             ax.minorticks_off()
+        if log_y:
+            ax.set_yscale("log")
         if baseline_dict[factor] in levels:
             ref_x = float(baseline_dict[factor]) if numeric else levels.index(baseline_dict[factor])
             _mark_reference_level(ax, ref_x)

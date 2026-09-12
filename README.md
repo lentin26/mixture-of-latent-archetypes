@@ -147,12 +147,17 @@ combined sweep):
    which should saturate near the true count even when over-specified.
 5. **Computational Scalability** — how does fit time grow with problem size?
    The same `ofat_design` + `run_design` machinery as (3), plotted with
-   `plot_ofat_sensitivity(..., metric="train_time_sec")`.
+   `plot_ofat_sensitivity(..., metric="train_time_sec", log_x=True, log_y=True)`.
 
 `plot_ofat_sensitivity` takes the **per-run** table from `run_design`
 directly, not `summarize_results`'s aggregated output (which drops the
 per-condition factor columns the sensitivity plot needs) — it computes the
-mean/std per factor level itself.
+mean/std per factor level itself. Use `log_x` and `log_y` together (not
+`log_x` alone) when checking a scaling law like (5): on log-log axes a power
+law `y ~ x**p` is a straight line of slope `p`, so linear cost reads as a
+straight line. Plotted with a linear y-axis instead, genuinely linear cost
+bends upward and can look quadratic or exponential — a straight line under
+log-x/linear-y actually corresponds to *logarithmic* growth, not linear.
 
 ## Tests
 
