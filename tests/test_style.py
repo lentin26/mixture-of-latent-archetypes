@@ -14,7 +14,7 @@ matplotlib.use("Agg")  # headless; no display required
 import matplotlib.pyplot as plt
 import pytest
 
-from src.style import RC_PUBLICATION, apply, figsize, publication_style, strip_titles
+from src.style import RC_PUBLICATION, apply, figsize, humanize_label, publication_style, strip_titles
 
 
 @pytest.fixture(autouse=True)
@@ -113,3 +113,24 @@ def test_strip_titles_can_also_clear_panel_titles():
 def test_strip_titles_tolerates_a_figure_with_no_suptitle():
     fig, ax = plt.subplots()
     strip_titles(fig)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# humanize_label
+# --------------------------------------------------------------------------- #
+def test_humanize_label_uses_an_exact_override():
+    assert humanize_label("mu_rmse", {"mu_rmse": "Archetype Recovery RMSE"}) == "Archetype Recovery RMSE"
+
+
+def test_humanize_label_falls_back_to_title_case():
+    assert humanize_label("n_learners") == "N Learners"
+    assert humanize_label("n_learners", {"mu_rmse": "..."}) == "N Learners"  # unrelated override ignored
+
+
+def test_humanize_label_keeps_known_acronyms_upper_case_in_fallback():
+    assert humanize_label("holdout_auc") == "Holdout AUC"
+    assert humanize_label("theta_rmse") == "Theta RMSE"
+
+
+def test_humanize_label_handles_a_single_word():
+    assert humanize_label("sampling") == "Sampling"

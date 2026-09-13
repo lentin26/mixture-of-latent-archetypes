@@ -163,3 +163,28 @@ def strip_titles(fig, keep_panel_titles: bool = True) -> None:
     if not keep_panel_titles:
         for ax in fig.axes:
             ax.set_title("")
+
+
+# A few statistics/ML acronyms worth keeping upper-case in the generic
+# fallback below, so an unmapped name like "holdout_auc" still reads as
+# "Holdout AUC" rather than "Holdout Auc".
+_ACRONYMS = {"auc", "mae", "rmse", "nll", "ari", "em", "id"}
+
+
+def humanize_label(name: str, overrides: dict[str, str] | None = None) -> str:
+    """Turn a ``snake_case`` column/variable name into a readable label.
+
+    Checks ``overrides`` first for an exact match on ``name`` (e.g. a
+    domain-specific dict mapping ``"mu_rmse"`` -> ``"Archetype Recovery
+    RMSE"``); anything not listed there falls back to a generic
+    ``"the_name"`` -> ``"The Name"`` conversion, capitalizing a short list of
+    common statistical acronyms (``_ACRONYMS``) instead of title-casing them.
+    The fallback means a plot never shows a raw ``snake_case`` name just
+    because nobody has labeled that particular metric yet -- but a curated
+    ``overrides`` dict, kept next to the code that owns those names, should
+    still be the primary source for anything that matters.
+    """
+    if overrides and name in overrides:
+        return overrides[name]
+    words = name.replace("_", " ").split(" ")
+    return " ".join(w.upper() if w.lower() in _ACRONYMS else w.capitalize() for w in words)

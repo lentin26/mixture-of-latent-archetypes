@@ -18,6 +18,7 @@ import pytest
 from src.simulations.factors import SimulationCondition, ofat_design
 from src.simulations.run import run_condition, run_design, run_init_repeats, run_m_sweep
 from src.simulations.viz import (
+    METRIC_LABELS,
     align_recovered_components,
     plot_component_recovery,
     plot_component_recovery_distribution,
@@ -211,6 +212,33 @@ def test_ofat_sensitivity_log_y_sets_log_yscale():
     assert ax.get_yscale() == "log"
 
 
+def test_ofat_sensitivity_uses_nice_labels_by_default():
+    conditions = ofat_design(baseline=SMALL_VIZ, factors=["n_learners"])
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="mu_rmse", baseline=SMALL_VIZ,
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    assert ax.get_title() == METRIC_LABELS["n_learners"]
+    assert ax.get_ylabel() == METRIC_LABELS["mu_rmse"]
+    assert METRIC_LABELS["mu_rmse"] in fig._suptitle.get_text()
+    # a raw snake_case name should never leak into the figure
+    assert "n_learners" not in ax.get_title()
+
+
+def test_ofat_sensitivity_labels_override_the_default():
+    conditions = ofat_design(baseline=SMALL_VIZ, factors=["n_learners"])
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="mu_rmse", baseline=SMALL_VIZ,
+        labels={"n_learners": "Custom Label"},
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    assert ax.get_title() == "Custom Label"
+
+
 # --------------------------------------------------------------------------- #
 # plot_m_sensitivity (Sensitivity to the Number of Archetypes)
 # --------------------------------------------------------------------------- #
@@ -222,3 +250,24 @@ def test_m_sensitivity_one_panel_per_metric():
         metrics=("mu_rmse", "effective_n_archetypes"),
     )
     assert len([ax for ax in fig.axes if ax.get_visible()]) == 2
+
+
+def test_m_sensitivity_uses_nice_labels_by_default():
+    results = run_m_sweep(SMALL_VIZ, n_components_grid=[1, 2, 3], seed=0)
+    fig = plot_m_sensitivity(
+        results, true_n_archetypes=SMALL_VIZ.n_archetypes, metrics=("mu_rmse",),
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    assert ax.get_title() == METRIC_LABELS["mu_rmse"]
+    assert ax.get_ylabel() == METRIC_LABELS["mu_rmse"]
+    assert ax.get_xlabel() == METRIC_LABELS["n_components_fit"]
+
+
+def test_m_sensitivity_labels_override_the_default():
+    results = run_m_sweep(SMALL_VIZ, n_components_grid=[1, 2, 3], seed=0)
+    fig = plot_m_sensitivity(
+        results, true_n_archetypes=SMALL_VIZ.n_archetypes, metrics=("mu_rmse",),
+        labels={"mu_rmse": "Custom Metric Name"},
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    assert ax.get_title() == "Custom Metric Name"

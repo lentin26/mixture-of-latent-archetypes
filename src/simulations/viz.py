@@ -31,12 +31,52 @@ import pandas as pd
 from src.simulations.factors import BASELINE, FACTOR_LEVELS, SimulationCondition
 from src.simulations.metrics import align_components
 from src.simulations.run import SimulationResult
+from src.style import humanize_label
 
 ASSUMED_KW = dict(color="#1f77b4", marker="o", markersize=4, linewidth=1.8, label="assumed")
 RECOVERED_KW = dict(
     color="#d62728", marker="x", markersize=5, linewidth=1.8, linestyle="--",
     label="recovered",
 )
+
+# Human-readable labels for simulation metrics and SimulationCondition
+# factors, so a figure never shows a raw snake_case column name. Used by
+# plot_ofat_sensitivity / plot_m_sensitivity via their `labels=` argument,
+# which merges on top of this dict -- pass e.g. labels={"mu_rmse": "..."} to
+# override just one entry for a single figure. Anything not listed here
+# falls back to src.style.humanize_label's generic Title Case conversion.
+METRIC_LABELS: dict[str, str] = {
+    # recovery metrics (vs. the data-generating parameters)
+    "mu_rmse": "Archetype Recovery RMSE",
+    "pi_mae": "Mixture Weight MAE",
+    "theta_rmse": "Item Difficulty RMSE",
+    "assignment_ari": "Cluster Assignment ARI",
+    # predictive metrics (held-out responses)
+    "holdout_auc": "Holdout AUC",
+    "holdout_brier": "Holdout Brier Score",
+    "holdout_nll": "Holdout Negative Log-Likelihood",
+    "final_nll": "Final Training Negative Log-Likelihood",
+    # fit diagnostics
+    "n_em_iters": "EM Iterations",
+    "train_time_sec": "Training Time (s)",
+    "n_observations": "Number of Observations",
+    "effective_n_archetypes": "Effective Number of Archetypes",
+    # SimulationCondition factors
+    "n_archetypes": "Number of Archetypes",
+    "n_components_fit": "Fitted Number of Archetypes",
+    "n_learners": "Number of Learners",
+    "responses_per_learner": "Responses per Learner",
+    "n_skills": "Number of Skills",
+    "n_items": "Number of Items",
+    "archetype_separation": "Archetype Separation",
+    "archetype_imbalance": "Archetype Imbalance",
+    "initialization": "Initialization",
+    "sampling": "Sampling",
+    "item_coverage": "Item Coverage",
+    "model_specification": "Model Specification",
+    "response_function": "Response Function",
+    "holdout_frac": "Holdout Fraction",
+}
 
 
 def _as_matrix(mu) -> np.ndarray:
@@ -358,6 +398,7 @@ def plot_ofat_sensitivity(
     log_y: bool = False,
     max_cols: int = 4,
     figsize: tuple[float, float] | None = None,
+    labels: dict[str, str] | None = None,
     save: str | Path | None = None,
 ):
     """Small-multiples plot of ``metric`` vs. level, one panel per OFAT factor.
@@ -385,10 +426,17 @@ def plot_ofat_sensitivity(
     genuinely linear cost bends upward and can look quadratic or exponential,
     since a straight line under log-x/linear-y actually corresponds to
     *logarithmic* growth, not linear.
+
+    ``labels`` merges on top of :data:`METRIC_LABELS` for the factor/metric
+    names shown in panel titles and the y-axis label -- pass e.g.
+    ``labels={"mu_rmse": "..."}`` to override just one entry for this figure;
+    anything neither in ``labels`` nor :data:`METRIC_LABELS` falls back to
+    :func:`src.style.humanize_label`'s generic Title Case conversion.
     Returns the :class:`matplotlib.figure.Figure`.
     """
     factors = list(factors) if factors is not None else sorted(FACTOR_LEVELS)
     baseline_dict = baseline.to_dict()
+    label_map = {**METRIC_LABELS, **(labels or {})}
 
     ncols = min(max_cols, len(factors))
     nrows = math.ceil(len(factors) / ncols)
@@ -434,13 +482,13 @@ def plot_ofat_sensitivity(
         else:
             ax.set_xticks(np.arange(len(levels)))
         ax.set_xticklabels([str(lv) for lv in levels], rotation=30, ha="right", fontsize=8)
-        ax.set_title(factor, fontsize=9)
+        ax.set_title(humanize_label(factor, label_map), fontsize=9)
         ax.grid(alpha=0.3, linewidth=0.6)
         if idx % ncols == 0:
-            ax.set_ylabel(metric)
+            ax.set_ylabel(humanize_label(metric, label_map))
     for j in range(len(factors), len(flat)):
         flat[j].set_visible(False)
-    fig.suptitle(f"OFAT sensitivity: {metric}", fontsize=12)
+    fig.suptitle(f"OFAT Sensitivity: {humanize_label(metric, label_map)}", fontsize=12)
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)
@@ -452,6 +500,7 @@ def plot_m_sensitivity(
     true_n_archetypes: int,
     metrics: Sequence[str] = ("mu_rmse", "holdout_auc", "effective_n_archetypes"),
     figsize: tuple[float, float] | None = None,
+    labels: dict[str, str] | None = None,
     save: str | Path | None = None,
 ):
     """One panel per metric in ``metrics``, x-axis = fitted ``n_components``,
@@ -462,10 +511,14 @@ def plot_m_sensitivity(
     diagnostics (:meth:`MoLA.effective_n_archetypes`,
     :meth:`MoLA.redundancy_report`) should show recovery holding up, and the
     effective count saturating near the truth, even once the fitted model is
-    given more components than it needs. Returns the
-    :class:`matplotlib.figure.Figure`.
+    given more components than it needs.
+
+    ``labels`` merges on top of :data:`METRIC_LABELS` for the metric names
+    shown in panel titles/y-labels, same as :func:`plot_ofat_sensitivity`.
+    Returns the :class:`matplotlib.figure.Figure`.
     """
     m_values = [int(r.metrics["n_components_fit"]) for r in results]
+    label_map = {**METRIC_LABELS, **(labels or {})}
 
     ncols = min(4, len(metrics))
     nrows = math.ceil(len(metrics) / ncols)
@@ -481,9 +534,9 @@ def plot_m_sensitivity(
             y = [r.metrics[metric] for r in results]
         ax.plot(m_values, y, marker="o", color="#1f77b4")
         _mark_reference_level(ax, true_n_archetypes)
-        ax.set_xlabel("n_components (fitted)")
-        ax.set_ylabel(metric)
-        ax.set_title(metric, fontsize=9)
+        ax.set_xlabel(humanize_label("n_components_fit", label_map))
+        ax.set_ylabel(humanize_label(metric, label_map))
+        ax.set_title(humanize_label(metric, label_map), fontsize=9)
         ax.grid(alpha=0.3, linewidth=0.6)
     for j in range(len(metrics), len(flat)):
         flat[j].set_visible(False)

@@ -165,9 +165,13 @@ log-x/linear-y actually corresponds to *logarithmic* growth, not linear.
 `src.simulations`) for figures headed into a LaTeX paper: print-legible
 fonts/line weights, vector-safe embedded text (`pdf.fonttype=42`, so text
 stays real/searchable rather than a bitmap), and no dependency on a local
-LaTeX toolchain (`text.usetex` stays `False`; a Computer-Modern-like serif
-font plus Matplotlib's `cm` mathtext set gets visually close to real LaTeX
-text without it).
+LaTeX toolchain (`text.usetex` stays `False`; a Times-like serif font plus
+Matplotlib's `dejavuserif` mathtext set gets visually close to real LaTeX
+text without it). Deliberately avoids Matplotlib's `"cmr10"`/`"Computer
+Modern Roman"` font names in the serif fallback list — those are internal
+mathtext-only assets, and using them as the plain-text body font drops
+ordinary glyphs like the literal underscore (`"n_learners"` renders as
+`"n˙learners"`).
 
 ```python
 from src.style import apply, figsize
@@ -192,6 +196,15 @@ source, not baked into the image).
 
 `notebooks/simulation-study.ipynb` applies this to all five experiment
 figures.
+
+`plot_ofat_sensitivity` and `plot_m_sensitivity` also never show a raw
+`snake_case` column name: `src.simulations.viz.METRIC_LABELS` maps known
+metric/factor names to readable labels (e.g. `mu_rmse` -> "Archetype
+Recovery RMSE", `n_learners` -> "Number of Learners"). Pass
+`labels={"mu_rmse": "..."}` to override or extend it for one figure;
+anything not listed falls back to `src.style.humanize_label`'s generic
+`snake_case` -> `Title Case` conversion (keeping a few statistical acronyms
+like AUC/RMSE upper-case) rather than showing the raw name.
 
 ## Tests
 
