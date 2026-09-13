@@ -382,7 +382,6 @@ def plot_component_recovery_distribution(
     for j in range(len(matched), len(flat)):
         flat[j].set_visible(False)
     flat[0].legend(fontsize=8, loc="lower right")
-    fig.suptitle("Recovered-component distribution across repeated fits", fontsize=12)
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)
