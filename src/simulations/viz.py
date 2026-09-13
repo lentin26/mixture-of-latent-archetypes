@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.simulations.dgp import SimulatedDataset
 from src.simulations.factors import BASELINE, FACTOR_LEVELS, SimulationCondition
 from src.simulations.metrics import align_components
 from src.simulations.run import SimulationResult
@@ -313,6 +314,45 @@ def plot_recovery_scatter(
     return ax
 
 
+def plot_theta_recovery(
+    result: SimulationResult | None = None,
+    *,
+    theta_true=None,
+    theta_est=None,
+    ax: plt.Axes | None = None,
+    save: str | Path | None = None,
+):
+    """Scatter recovered vs. assumed item difficulty (``theta``), one point per item.
+
+    Pass a :class:`SimulationResult` (from ``run_condition(..., return_fit=True)``)
+    or ``theta_true`` / ``theta_est`` arrays directly. Unlike archetype recovery,
+    items keep a fixed, unambiguous index -- there's no label-switching across a
+    mixture's components -- so no Hungarian alignment step is needed here; each
+    item is simply compared to itself. Returns the ``Axes``.
+    """
+    if result is not None:
+        theta_true = result.data.theta
+        theta_est = result.model.theta
+    elif theta_true is None or theta_est is None:
+        raise ValueError("pass either `result` or both `theta_true` and `theta_est`")
+    theta_true = np.asarray(theta_true, dtype=float).ravel()
+    theta_est = np.asarray(theta_est, dtype=float).ravel()
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4.5, 4.5))
+    ax.scatter(theta_true, theta_est, s=20, alpha=0.6, color="#1f77b4")
+    ax.plot([0, 1], [0, 1], color="0.4", linewidth=1, linestyle=":")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("assumed item easiness (theta)")
+    ax.set_ylabel("recovered item easiness (theta)")
+    ax.set_aspect("equal")
+    ax.grid(alpha=0.3, linewidth=0.6)
+    if save is not None:
+        _savefig(ax.figure, save)
+    return ax
+
+
 def _mark_reference_level(ax, x_position: float) -> None:
     """Dotted vertical line marking a reference/baseline level on the x-axis."""
     ax.axvline(x_position, color="0.6", linestyle=":", linewidth=1)
@@ -540,6 +580,102 @@ def plot_m_sensitivity(
     for j in range(len(metrics), len(flat)):
         flat[j].set_visible(False)
     fig.suptitle("Sensitivity to the number of archetypes", fontsize=12)
+    fig.tight_layout()
+    if save is not None:
+        _savefig(fig, save)
+    return fig
+
+
+def _pairwise_jaccard(Q: np.ndarray) -> np.ndarray:
+    """Pairwise Jaccard similarity between every pair of Q-matrix columns
+    (skills), as a flat array over the upper triangle (excludes the diagonal,
+    which is trivially 1)."""
+    Qb = (np.asarray(Q) > 0).astype(int)
+    n_skills = Qb.shape[1]
+    inter = Qb.T @ Qb
+    sizes = np.diag(inter)
+    union = sizes[:, None] + sizes[None, :] - inter
+    with np.errstate(divide="ignore", invalid="ignore"):
+        jaccard = np.where(union > 0, inter / union, 0.0)
+    i, j = np.triu_indices(n_skills, k=1)
+    return jaccard[i, j]
+
+
+def plot_setup_diagnostics(
+    data: SimulatedDataset,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+):
+    """Six-panel check that the simulated data matches the intended design.
+
+    This validates the *simulator*, not MoLA -- pass one :class:`SimulatedDataset`
+    (e.g. from ``generate_dataset``) and get: (1) users per archetype vs. the
+    expected count from ``pi``, (2) responses per user (a spike at
+    ``responses_per_learner`` under ``sampling="iid"``; a real distribution
+    under ``"sparse"``), (3) items per skill, (4) skills per item, (5) the
+    distribution of pairwise Q-matrix column (skill) similarity -- a right
+    tail near 1 would flag an identifiability risk, (6) archetype separation,
+    reusing :func:`plot_components` for the direct visual. Returns the
+    :class:`matplotlib.figure.Figure`.
+    """
+    n_archetypes = data.mu.shape[0]
+    fig, axes = plt.subplots(2, 3, figsize=figsize or (12, 7))
+    flat = axes.ravel()
+
+    # 1. users per archetype
+    ax = flat[0]
+    counts = np.bincount(data.z, minlength=n_archetypes)
+    expected = data.pi.ravel() * len(data.z)
+    ax.bar(np.arange(n_archetypes), counts, color="#1f77b4", alpha=0.8, label="realized")
+    ax.scatter(np.arange(n_archetypes), expected, color="#d62728", marker="_", s=400,
+               linewidths=2, label="expected (pi * n_learners)", zorder=3)
+    ax.set_xlabel("archetype")
+    ax.set_ylabel("number of learners")
+    ax.set_title("Users per archetype", fontsize=9)
+    ax.legend(fontsize=7)
+
+    # 2. responses per user
+    ax = flat[1]
+    responses_per_user = (~np.isnan(data.X)).sum(axis=1)
+    ax.hist(responses_per_user, bins=min(20, len(np.unique(responses_per_user))), color="#1f77b4")
+    ax.set_xlabel("responses per learner")
+    ax.set_ylabel("number of learners")
+    ax.set_title("Responses per user", fontsize=9)
+
+    # 3. items per skill
+    ax = flat[2]
+    items_per_skill = np.asarray(data.Q.sum(axis=0)).ravel()
+    ax.bar(np.arange(len(items_per_skill)), items_per_skill, color="#1f77b4")
+    ax.set_xlabel("skill index")
+    ax.set_ylabel("number of items")
+    ax.set_title("Items per skill", fontsize=9)
+
+    # 4. skills per item
+    ax = flat[3]
+    skills_per_item = np.asarray(data.Q.sum(axis=1)).ravel()
+    bins = np.arange(skills_per_item.min(), skills_per_item.max() + 2) - 0.5
+    ax.hist(skills_per_item, bins=bins, color="#1f77b4", rwidth=0.8)
+    ax.set_xlabel("skills required")
+    ax.set_ylabel("number of items")
+    ax.set_title("Skills per item", fontsize=9)
+
+    # 5. Q-matrix column (skill) similarity
+    ax = flat[4]
+    similarities = _pairwise_jaccard(data.Q)
+    ax.hist(similarities, bins=20, range=(0, 1), color="#1f77b4")
+    ax.set_xlabel("pairwise Jaccard similarity")
+    ax.set_ylabel("number of skill pairs")
+    ax.set_title(f"Q-matrix column similarity\nmax={similarities.max():.2f}", fontsize=9)
+
+    # 6. archetype separation
+    ax = flat[5]
+    plot_components(data.mu, ax=ax, weights=data.pi)
+    diffs = data.mu[:, None, :] - data.mu[None, :, :]
+    dists = np.linalg.norm(diffs, axis=2)
+    i, j = np.triu_indices(n_archetypes, k=1)
+    pairwise = dists[i, j]
+    ax.set_title(f"Archetype separation\nmean pairwise distance={pairwise.mean():.2f}", fontsize=9)
+
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)

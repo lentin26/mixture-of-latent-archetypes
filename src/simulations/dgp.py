@@ -81,28 +81,65 @@ def q_matrix(
     coverage: str,
     rng: np.random.Generator,
     skills_per_item: tuple[int, int] = (1, 3),
+    balance_power: float = 6.0,
+    max_resample: int = 50,
 ) -> np.ndarray:
-    Q = np.zeros((n_items, n_skills), dtype=float)
+    """Draw a Q-matrix, self-balancing item coverage across skills.
+
+    Each item's skills are still drawn independently at random -- which
+    items measure which skills stays stochastic, so there's no deterministic
+    template that could accidentally give two skills an identical or
+    periodic item pattern. But the sampling weight for skill k is reweighted
+    by how many items have already been assigned to it
+    (``1 / (count + 1) ** balance_power``), so the process self-corrects
+    toward equal coverage instead of leaving it to chance. Plain i.i.d.
+    sampling (the previous behavior, recovered with ``balance_power=0``)
+    makes "balanced" coverage mean equal *probability* per skill, not equal
+    *realized* count -- with ~50-60 items over 20 skills that leaves real
+    sampling noise (e.g. a 2-to-12 item range), which is enough to make
+    lightly-covered skills noticeably less precisely estimated than
+    well-covered ones. `coverage` still controls the *prior* shape (uniform
+    for "balanced", Zipf-decayed for "uneven") that this correction acts
+    around, so "uneven" still produces a systematically skewed Q-matrix by
+    design -- it just no longer *additionally* suffers from sampling noise
+    on top of that intended skew.
+
+    After construction, verifies no two skill columns are identical (which
+    would make those two skills statistically indistinguishable to any
+    fitting model) and resamples (bounded retries) if they are.
+    """
     lo, hi = skills_per_item
     if coverage == "balanced":
-        skill_p = np.ones(n_skills) / n_skills
+        base_p = np.ones(n_skills) / n_skills
     else:
-        skill_p = 1.0 / np.power(np.arange(1, n_skills + 1, dtype=float), 1.2)
-        skill_p = skill_p / skill_p.sum()
+        base_p = 1.0 / np.power(np.arange(1, n_skills + 1, dtype=float), 1.2)
+        base_p = base_p / base_p.sum()
 
-    for j in range(n_items):
-        n_q = int(rng.integers(lo, hi + 1))
-        n_q = min(n_q, n_skills)
-        skills = rng.choice(n_skills, size=n_q, replace=False, p=skill_p)
-        Q[j, skills] = 1.0
+    for _attempt in range(max_resample):
+        Q = np.zeros((n_items, n_skills), dtype=float)
+        counts = np.zeros(n_skills)
+        for j in rng.permutation(n_items):
+            n_q = min(int(rng.integers(lo, hi + 1)), n_skills)
+            weights = base_p / (counts + 1.0) ** balance_power
+            weights = weights / weights.sum()
+            skills = rng.choice(n_skills, size=n_q, replace=False, p=weights)
+            Q[j, skills] = 1.0
+            counts[skills] += 1
 
-    unused = np.where(Q.sum(axis=0) == 0)[0]
-    for k in unused:
-        Q[int(rng.integers(0, n_items)), k] = 1.0
-    empty_items = np.where(Q.sum(axis=1) == 0)[0]
-    for j in empty_items:
-        Q[j, int(rng.integers(0, n_skills))] = 1.0
-    return Q
+        unused = np.where(Q.sum(axis=0) == 0)[0]
+        for k in unused:
+            Q[int(rng.integers(0, n_items)), k] = 1.0
+        empty_items = np.where(Q.sum(axis=1) == 0)[0]
+        for j in empty_items:
+            Q[j, int(rng.integers(0, n_skills))] = 1.0
+
+        if np.unique(Q, axis=1).shape[1] == n_skills:
+            return Q
+
+    raise RuntimeError(
+        f"could not draw a Q-matrix with distinct skill columns after {max_resample} "
+        f"attempts (n_items={n_items}, n_skills={n_skills}); increase n_items or reduce n_skills"
+    )
 
 
 def misspecify_q(Q: np.ndarray, rng: np.random.Generator, flip_prob: float = Q_FLIP_PROB) -> np.ndarray:
@@ -204,6 +241,14 @@ def generate_dataset(condition: SimulationCondition, seed: int | None = None) ->
     )
     theta = item_easiness(n_items, rng)
     Q = q_matrix(n_items, condition.n_skills, condition.item_coverage, rng)
+    # Plain multinomial draw, deliberately not stratified: a real cohort of
+    # learners samples from the population at random, so realized archetype
+    # counts should show the same sampling noise around `pi` that real data
+    # would -- forcing exact proportions would remove a genuine source of
+    # difficulty (especially for a small/rare archetype), not a simulator
+    # artifact. Contrast with q_matrix()'s coverage, which balances by
+    # construction because Q-matrix coverage is a test-design choice, not a
+    # sampling outcome.
     z = rng.choice(condition.n_archetypes, size=condition.n_learners, p=pi)
 
     P = component_item_probs(mu, theta, Q, condition.response_function)

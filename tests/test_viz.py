@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
+from src.simulations.dgp import generate_dataset
 from src.simulations.factors import SimulationCondition, ofat_design
 from src.simulations.run import run_condition, run_design, run_init_repeats, run_m_sweep
 from src.simulations.viz import (
@@ -26,6 +27,8 @@ from src.simulations.viz import (
     plot_m_sensitivity,
     plot_ofat_sensitivity,
     plot_recovery_scatter,
+    plot_setup_diagnostics,
+    plot_theta_recovery,
 )
 
 RNG = np.random.default_rng(0)
@@ -271,3 +274,44 @@ def test_m_sensitivity_labels_override_the_default():
     )
     ax = [a for a in fig.axes if a.get_visible()][0]
     assert ax.get_title() == "Custom Metric Name"
+
+
+# --------------------------------------------------------------------------- #
+# plot_setup_diagnostics / plot_theta_recovery
+# --------------------------------------------------------------------------- #
+def test_setup_diagnostics_has_six_panels_from_real_data():
+    data = generate_dataset(SMALL_VIZ, seed=0)
+    fig = plot_setup_diagnostics(data)
+    assert len(fig.axes) == 6
+
+
+def test_setup_diagnostics_users_per_archetype_matches_realized_counts():
+    # z is a plain (not stratified) draw from pi -- real cohorts sample with
+    # ordinary noise around the population mixture, so the plot should show
+    # the actual realized bincount, not an idealized exact match to pi.
+    data = generate_dataset(SMALL_VIZ, seed=0)
+    fig = plot_setup_diagnostics(data)
+    bar_heights = [p.get_height() for p in fig.axes[0].patches]
+    np.testing.assert_allclose(sorted(bar_heights), sorted(np.bincount(data.z)))
+
+
+def test_theta_recovery_from_result():
+    cond = SimulationCondition(
+        n_archetypes=2, n_learners=150, responses_per_learner=8, n_skills=4, n_iter=5
+    )
+    result = run_condition(cond, seed=0, return_fit=True)
+    ax = plot_theta_recovery(result)
+    n_items = result.data.theta.shape[0]
+    assert len(ax.collections[0].get_offsets()) == n_items
+
+
+def test_theta_recovery_from_arrays():
+    theta_true = np.array([0.2, 0.5, 0.8])
+    theta_est = np.array([0.25, 0.45, 0.75])
+    ax = plot_theta_recovery(theta_true=theta_true, theta_est=theta_est)
+    assert len(ax.collections[0].get_offsets()) == 3
+
+
+def test_theta_recovery_requires_result_or_arrays():
+    with pytest.raises(ValueError):
+        plot_theta_recovery()

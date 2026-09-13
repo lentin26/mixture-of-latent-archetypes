@@ -129,9 +129,16 @@ claim about MoLA's archetype recovery (each needs a different axis held fixed
 and a different axis varied, which is why they're separate rather than one
 combined sweep):
 
+0. **Simulation Setup** (not one of the five claims — validates the
+   *simulator*, not MoLA) — `plot_setup_diagnostics(data)` checks users per
+   archetype (vs. `pi`), responses per user, items per skill, skills per
+   item, Q-matrix column (skill) similarity, and archetype separation, all
+   from one `generate_dataset(...)` call.
 1. **Archetype Recovery** — does MoLA recover the generating structure at
    all? `run_condition(..., return_fit=True)` + `plot_component_recovery` /
-   `plot_recovery_scatter`.
+   `plot_recovery_scatter` for archetypes (`mu`), `plot_theta_recovery` for
+   item difficulty (`theta`) — items have a fixed index, so no Hungarian
+   alignment is needed there, unlike archetypes.
 2. **Estimation Stability** — does the solution depend on arbitrary
    initialization? `run_init_repeats` fixes one simulated dataset and its
    train/holdout split, then re-fits it many times varying only the EM
@@ -158,6 +165,23 @@ law `y ~ x**p` is a straight line of slope `p`, so linear cost reads as a
 straight line. Plotted with a linear y-axis instead, genuinely linear cost
 bends upward and can look quadratic or exponential — a straight line under
 log-x/linear-y actually corresponds to *logarithmic* growth, not linear.
+
+`src/simulations/dgp.py`'s `q_matrix` self-balances item coverage across
+skills — closing a real confound found in the Estimation Stability figure
+(a running-count-weighted draw, not the old fixed per-skill probability,
+which only matched "balanced" coverage in expectation and left real
+sampling noise, e.g. a 2-to-12 item range over 20 skills at typical scale).
+`q_matrix` also guarantees no two skill columns are identical (resampling
+if they are), closing a gap where nothing previously checked Q-matrix
+identifiability. Archetype membership (`z`) is deliberately **not** given
+the same treatment — it stays a plain draw from `pi`, with ordinary
+sampling noise, since a real cohort of learners samples from the population
+at random rather than being recruited in exact quotas matched to an
+unobserved archetype; forcing exact proportions there would remove a
+genuine source of estimation difficulty rather than an artifact of the
+simulator. Q-matrix coverage is a test-design choice (something a real
+test-maker controls); archetype population size is a sampling outcome
+(something no one controls) — the two aren't analogous.
 
 ### Publication-quality figures
 
@@ -216,13 +240,15 @@ pytest tests/ -q
 (parameter ranges, seed determinism, monotonic convergence), the
 stability/stopping checks, and the posterior, predictive and
 psi/difficulty/redundancy read-outs, all on a tiny fit.
-`tests/test_simulations.py` covers the design grid, the data-generating process,
+`tests/test_simulations.py` covers the design grid, the data-generating
+process (including `q_matrix`'s column-distinctness/balance guarantees),
 `run_condition` / `run_design` / `summarize_results` / `run_init_repeats` /
-`run_m_sweep`, the `n_components_fit` misspecification validation, and the CLI
-wiring, all on a tiny simulation condition so the suite finishes in a few
-seconds.
+`run_m_sweep`, the `n_components_fit` misspecification validation, and the
+CLI wiring, all on a
+tiny simulation condition so the suite finishes in a few seconds.
 `tests/test_viz.py` covers the component-recovery plots and the five-experiment
 study's plots (`plot_component_recovery_distribution`, `plot_ofat_sensitivity`,
-`plot_m_sensitivity`), headless (Agg backend).
+`plot_m_sensitivity`, `plot_setup_diagnostics`, `plot_theta_recovery`),
+headless (Agg backend).
 `tests/test_style.py` covers `figsize`, `publication_style` / `apply`, and
 `strip_titles`.
