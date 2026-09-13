@@ -57,7 +57,7 @@ class SimulationCondition:
     responses_per_learner: int = 30
     archetype_separation: Separation = "medium"
     archetype_imbalance: Imbalance = "balanced"
-    initialization: Initialization = "random"
+    initialization: Initialization = "k-means"
     sampling: Sampling = "iid"
     item_coverage: ItemCoverage = "balanced"
     model_specification: ModelSpecification = "mola_correct"

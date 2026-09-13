@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.special import expit
@@ -280,3 +280,44 @@ def generate_dataset(condition: SimulationCondition, seed: int | None = None) ->
         theta=theta,
         condition=condition,
     )
+
+
+def resample_dataset(data: SimulatedDataset, seed: int) -> SimulatedDataset:
+    """Redraw a new sample from the SAME population as `data`.
+
+    `generate_dataset` draws a fresh population (`mu`, `theta`, `pi`, `Q`,
+    and `Q_fit` -- the assessment's *stated* Q-matrix, deliberately wrong
+    under `model_specification="misspecified"`) and a fresh sample (`z`,
+    `X`, the observation mask) together from one seed. This instead holds
+    the population fixed -- including `Q_fit`, since a misspecified Q-matrix
+    is a fixed property of how the assessment was built, not something that
+    changes with which cohort of learners happens to take it (the same
+    design-choice-vs-sampling-outcome distinction `q_matrix` and `z` already
+    follow) -- and only redraws the sample: a new cohort of learners (`z`),
+    new response outcomes, and a new observed-item mask. Use it to study
+    sampling variability (how much would the estimate change with a
+    different cohort of the SAME population?) separately from population
+    variability (a differently-generated population altogether, what
+    `generate_dataset` with a new seed gives).
+
+    See `run_sample_repeats`, which uses this to characterize estimation
+    stability under repeated sampling once EM initialization itself isn't a
+    meaningful source of variability (e.g. under `initialization="k-means"`).
+    """
+    condition = data.condition
+    rng = _rng(seed)
+    n_items = data.Q.shape[0]
+    z = rng.choice(condition.n_archetypes, size=condition.n_learners, p=data.pi)
+    P = component_item_probs(data.mu, data.theta, data.Q, condition.response_function)
+    draw = rng.random((condition.n_learners, n_items))
+    X_full = (draw < P[z]).astype(float)
+    mask = observation_mask(
+        condition.n_learners,
+        n_items,
+        condition.responses_per_learner,
+        condition.sampling,
+        condition.item_coverage,
+        rng,
+    )
+    X = np.where(mask, X_full, np.nan)
+    return replace(data, X=X, z=z)

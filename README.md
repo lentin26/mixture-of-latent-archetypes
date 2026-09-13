@@ -41,9 +41,25 @@ model = MoLA(
     tol=1e-5,                    # relative NLL convergence tolerance
     pseudo_likelihood=False,     # pseudo-likelihood M-step + Beta pseudo-counts
     random_state=746,            # seed for parameter initialization
+    init="k-means",              # default; "random" is kept as an explicit option
 )
 model.fit(X)                     # dense ndarray (NaN = missing) or a scipy sparse matrix
 ```
+
+`init="k-means"` (the default) seeds `theta` from each item's raw observed
+correct-response rate and `mu` from k-means cluster centroids of each
+learner's per-skill correctness on observed items (`pi` from the resulting
+cluster proportions) -- computed inside `fit`, since it needs `X`.
+`init="random"` instead draws an uninformative start with no data (`mu`
+entrywise Uniform(0, 1), `theta` fixed at the maximum-entropy point 0.5,
+`pi` uniform) and is kept as an explicit option, e.g. to reproduce older
+results or inspect EM's own sensitivity to initialization -- see
+`notebooks/simulation-study.ipynb`'s Estimation Stability section: the two
+schemes often reach essentially the same final log-likelihood but noticeably
+different recovery accuracy, because the fitting objective has a near-flat
+ridge along which very different `(mu, theta)` solutions fit the observed
+responses almost equally well. An uninformative start has no way to prefer
+the higher-recovery basin along that ridge the way a data-informed one does.
 
 Fitted parameters: `model.mu` `(n_components, n_skills)`, `model.pi`
 `(n_components, 1)`, `model.theta` `(n_items, 1)`. `model.nll_trace` is the
@@ -139,11 +155,20 @@ combined sweep):
    `plot_recovery_scatter` for archetypes (`mu`), `plot_theta_recovery` for
    item difficulty (`theta`) — items have a fixed index, so no Hungarian
    alignment is needed there, unlike archetypes.
-2. **Estimation Stability** — does the solution depend on arbitrary
-   initialization? `run_init_repeats` fixes one simulated dataset and its
-   train/holdout split, then re-fits it many times varying only the EM
-   initialization draw; `plot_component_recovery_distribution` shows the
-   spread of recovered archetypes across those repeats.
+2. **Estimation Stability** — two sub-questions. **(2a, exploratory, not
+   used in the paper)** does the *initialization scheme* matter?
+   `run_init_repeats` fixes one simulated dataset and its train/holdout
+   split, then re-fits it many times varying only the EM initialization
+   draw, comparing `initialization="random"` against `"k-means"` across a
+   few `data_seed`s -- see `src/mola`'s `init` docstring for why they land in
+   different places despite similar likelihood. **(2b, the headline result)**
+   given the assumed k-means-informed initialization, how much does the
+   recovered structure vary just from *which* sample was drawn?
+   `run_sample_repeats` draws ONE population once, then repeatedly redraws
+   only the sample (`resample_dataset`) and refits; the same
+   `plot_component_recovery_distribution` shows the spread across samples
+   rather than across EM-initialization draws (pass `repeat_label="samples"`
+   so panel titles say so).
 3. **Robustness to Data Sparsity** — does recovery degrade gracefully as
    users (`n_learners`) or responses-per-user (`responses_per_learner`)
    shrink? `ofat_design` + `run_design` + `plot_ofat_sensitivity`.
@@ -236,15 +261,18 @@ like AUC/RMSE upper-case) rather than showing the raw name.
 pytest tests/ -q
 ```
 
-`tests/test_mola.py` covers the `MoLA` model itself: construction, the EM loop
+`tests/test_mola.py` covers the `MoLA` model itself: construction, both
+initialization schemes (`"k-means"` needs `X`, `"random"` doesn't; each is
+deterministic given `random_state` and independent of the other), the EM loop
 (parameter ranges, seed determinism, monotonic convergence), the
 stability/stopping checks, and the posterior, predictive and
 psi/difficulty/redundancy read-outs, all on a tiny fit.
 `tests/test_simulations.py` covers the design grid, the data-generating
-process (including `q_matrix`'s column-distinctness/balance guarantees),
+process (including `q_matrix`'s column-distinctness/balance guarantees and
+`resample_dataset`'s population-fixed/sample-varying contract),
 `run_condition` / `run_design` / `summarize_results` / `run_init_repeats` /
-`run_m_sweep`, the `n_components_fit` misspecification validation, and the
-CLI wiring, all on a
+`run_sample_repeats` / `run_m_sweep`, the `n_components_fit` misspecification
+validation, and the CLI wiring, all on a
 tiny simulation condition so the suite finishes in a few seconds.
 `tests/test_viz.py` covers the component-recovery plots and the five-experiment
 study's plots (`plot_component_recovery_distribution`, `plot_ofat_sensitivity`,

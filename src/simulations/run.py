@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.cluster import KMeans
 
 from src.mola import MoLA
-from src.simulations.dgp import SimulatedDataset, generate_dataset
+from src.simulations.dgp import SimulatedDataset, generate_dataset, resample_dataset
 from src.simulations.factors import (
     SimulationCondition,
     ofat_design,
@@ -29,9 +29,24 @@ from src.simulations.metrics import (
 
 
 class MoLAWithInit(MoLA):
-    """MoLA that can start from supplied (mu, theta, pi)."""
+    """MoLA that can start from supplied (mu, theta, pi).
+
+    Always forces `init="random"` on the base class regardless of what's
+    passed in `kwargs`: the override hooks below (`_init_mu`/`_init_theta`/
+    `_init_pi`) are only consulted by `_MoLABase._init_fit`'s "random"
+    branch -- MoLA's own `init="k-means"` (the base class default as of
+    this simulation harness's design) bypasses those hooks entirely and
+    computes its own data-informed init directly, which would silently
+    ignore `mu_init`/`theta_init`/`pi_init` here. This class exists
+    specifically so `src.simulations` can supply its own initialization
+    (including its own from-scratch k-means scheme, `_kmeans_init` below,
+    computed on `X_train`/`Q_fit` before the model is even constructed) via
+    `condition.initialization`, so it always needs the "random" dispatch
+    path, never MoLA's built-in one.
+    """
 
     def __init__(self, mu_init=None, theta_init=None, pi_init=None, **kwargs):
+        kwargs["init"] = "random"
         super().__init__(**kwargs)
         self.mu_init = mu_init
         self.theta_init = theta_init
@@ -86,10 +101,11 @@ def _kmeans_init(
     pi[: counts.size] = counts / counts.sum()
     mask = ~np.isnan(X)
     item_mean = np.nanmean(X, axis=0, keepdims=True).T
-    item_mean = np.where(np.isnan(item_mean), 0.7, item_mean)
+    # 0.5: maximum-entropy fallback for an item with no observed responses at all.
+    item_mean = np.where(np.isnan(item_mean), 0.5, item_mean)
     theta = np.clip(item_mean, 0.15, 0.95)
     if not np.any(mask):
-        theta[:] = 0.7
+        theta[:] = 0.5
     return mu, theta, pi.reshape(-1, 1)
 
 
@@ -254,6 +270,42 @@ def run_init_repeats(
         model = fit_mola(data, X_train, rng)
         train_time = time.perf_counter() - t0
         metrics = _score_fit(data, model, X_train, hold_mask, init_seed, train_time)
+        results.append(SimulationResult(metrics=metrics, model=model, data=data))
+    return results
+
+
+def run_sample_repeats(
+    condition: SimulationCondition,
+    population_seed: int,
+    n_repeats: int,
+    base_sample_seed: int = 0,
+) -> list[SimulationResult]:
+    """Fit MoLA on `n_repeats` independent samples drawn from ONE fixed
+    data-generating population -- isolates sampling variability (a new cohort
+    of learners, new realized responses) from EM initialization sensitivity
+    (see notebooks/simulation-study.ipynb, "Estimation Stability").
+
+    Unlike `run_init_repeats` (one dataset, varying EM's initialization draw),
+    this generates the population once (`generate_dataset`) and re-draws only
+    the sample each repeat (`resample_dataset`), refitting via
+    `condition.initialization` every time -- meant for `initialization=
+    "k-means"`, where EM's own initialization draw is no longer a meaningful
+    source of variability on its own (see the notebook's initialization-scheme
+    comparison), so what's left to characterize is genuine sampling
+    variability at this population and sample size.
+    """
+    population = generate_dataset(condition, seed=population_seed)
+    results = []
+    for i in range(n_repeats):
+        sample_seed = base_sample_seed + i
+        data = resample_dataset(population, seed=sample_seed)
+        split_rng = np.random.default_rng(sample_seed)
+        X_train, hold_mask = split_holdout(data.X, condition.holdout_frac, split_rng)
+        init_rng = np.random.default_rng(sample_seed)
+        t0 = time.perf_counter()
+        model = fit_mola(data, X_train, init_rng)
+        train_time = time.perf_counter() - t0
+        metrics = _score_fit(data, model, X_train, hold_mask, sample_seed, train_time)
         results.append(SimulationResult(metrics=metrics, model=model, data=data))
     return results
 

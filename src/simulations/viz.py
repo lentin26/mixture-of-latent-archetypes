@@ -366,19 +366,27 @@ def plot_component_recovery_distribution(
     skill_labels: Sequence | None = None,
     max_cols: int = 4,
     figsize: tuple[float, float] | None = None,
+    repeat_label: str = "inits",
     save: str | Path | None = None,
 ):
-    """Spread of recovered profiles across repeated fits of the SAME data.
+    """Spread of recovered profiles across repeated fits sharing one true ``mu``.
 
-    Pass a list of :class:`SimulationResult` sharing one ``data`` (e.g. from
-    ``run_init_repeats``), or ``mu_true`` plus a list of ``mu_est`` arrays
-    directly. Each repeat's recovered components are aligned to the true ones
-    independently (the Hungarian match can pick a different permutation each
-    time), then drawn one panel per true component: every repeat's aligned
-    profile thin and translucent, their median bold-dashed, the true profile
-    bold-solid (``ASSUMED_KW``). Use this to argue estimation stability --
-    tight bundles mean EM lands in essentially the same place regardless of
-    where it started. Returns the :class:`matplotlib.figure.Figure`.
+    Pass a list of :class:`SimulationResult` (e.g. from ``run_init_repeats``,
+    which fixes one dataset and varies only EM's initialization draw; or from
+    ``run_sample_repeats``, which fixes the population and varies only the
+    drawn sample -- either way every result must share the same true `mu`),
+    or ``mu_true`` plus a list of ``mu_est`` arrays directly. Each repeat's
+    recovered components are aligned to the true ones independently (the
+    Hungarian match can pick a different permutation each time), then drawn
+    one panel per true component: every repeat's aligned profile thin and
+    translucent, their median bold-dashed, the true profile bold-solid
+    (``ASSUMED_KW``). Tight bundles argue estimation stability -- under
+    ``run_init_repeats``, that the answer doesn't depend on where EM started;
+    under ``run_sample_repeats``, that the answer doesn't depend on which
+    particular sample was drawn. ``repeat_label`` names what varied between
+    repeats in each panel's title (default ``"inits"``; pass ``"samples"``
+    for ``run_sample_repeats`` results). Returns the
+    :class:`matplotlib.figure.Figure`.
     """
     if results is not None:
         mu_true = _as_matrix(results[0].data.mu)
@@ -417,7 +425,9 @@ def plot_component_recovery_distribution(
                  linewidth=2, linestyle="--", label="recovered (median)")
         ax.plot(x, mu_true[i, :k], **ASSUMED_KW)
         spread = float(curves.std(axis=0).mean())
-        ax.set_title(f"component {i}\nn={len(curves)} inits, mean sd={spread:.3f}", fontsize=9)
+        ax.set_title(
+            f"component {i}\nn={len(curves)} {repeat_label}, mean sd={spread:.3f}", fontsize=9
+        )
         _style_profile_axes(ax, x, labels, ylabel=(panel % ncols == 0))
     for j in range(len(matched), len(flat)):
         flat[j].set_visible(False)

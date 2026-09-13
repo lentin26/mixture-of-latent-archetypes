@@ -92,6 +92,7 @@ def test_defaults_when_no_kwargs():
     assert model.pseudo_likelihood is False
     assert model.mu_prior == (2, 2)
     assert model.model == "MoLA-id"
+    assert model.init == "k-means"
     assert model.Q is None
     assert model.a is None and model.b is None
 
@@ -99,6 +100,11 @@ def test_defaults_when_no_kwargs():
 def test_invalid_model_name_raises():
     with pytest.raises(ValueError, match="model must be one of"):
         MoLA(model="not-a-model")
+
+
+def test_invalid_init_raises():
+    with pytest.raises(ValueError, match="init must be one of"):
+        MoLA(init="not-a-scheme")
 
 
 def test_dense_q_matrix_is_row_normalized(toy):
@@ -123,10 +129,7 @@ def test_sparse_q_matrix_is_row_normalized_too(toy):
 # --------------------------------------------------------------------------- #
 # parameter initialization
 # --------------------------------------------------------------------------- #
-def test_init_fit_sets_shapes_and_stopping_state(toy):
-    model = _make_model(toy)
-    model._init_fit()
-
+def _assert_init_shapes_and_stopping_state(model):
     assert model.n_items == N_ITEMS
     assert model.n_skills == N_SKILLS
     assert model.mu.shape == (N_COMPONENTS, N_SKILLS)
@@ -140,11 +143,51 @@ def test_init_fit_sets_shapes_and_stopping_state(toy):
     assert model.nll_trace == []
 
 
-def test_init_is_deterministic_given_random_state(toy):
-    a, b = _make_model(toy), _make_model(toy)
+def test_init_fit_sets_shapes_and_stopping_state_random(toy):
+    """`init="random"` needs no data -- bare `_init_fit()` works."""
+    model = _make_model(toy, init="random")
+    model._init_fit()
+    _assert_init_shapes_and_stopping_state(model)
+
+
+def test_init_is_deterministic_given_random_state_random(toy):
+    a, b = _make_model(toy, init="random"), _make_model(toy, init="random")
     a._init_fit()
     b._init_fit()
     np.testing.assert_array_equal(a.mu, b.mu)
+
+
+def test_init_fit_sets_shapes_and_stopping_state_kmeans(toy):
+    """`init="k-means"` (the default) needs the response data `X`."""
+    model = _make_model(toy)
+    model._init_fit(model._prepare_X(toy["X"]))
+    _assert_init_shapes_and_stopping_state(model)
+
+
+def test_kmeans_init_requires_data(toy):
+    model = _make_model(toy)
+    with pytest.raises(ValueError, match="init='k-means' needs the response data"):
+        model._init_fit()
+
+
+def test_kmeans_init_is_deterministic_given_random_state(toy):
+    a, b = _make_model(toy), _make_model(toy)
+    a._init_fit(a._prepare_X(toy["X"]))
+    b._init_fit(b._prepare_X(toy["X"]))
+    np.testing.assert_array_equal(a.mu, b.mu)
+    np.testing.assert_array_equal(a.theta, b.theta)
+    np.testing.assert_array_equal(a.pi, b.pi)
+
+
+def test_kmeans_init_depends_on_the_data(toy):
+    """Unlike "random", k-means init should actually respond to `X`."""
+    other_x = toy["X"].copy()
+    other_x[:] = 1.0 - np.nan_to_num(other_x, nan=0.5)  # a very different response pattern
+    a = _make_model(toy)
+    b = _make_model(toy)
+    a._init_fit(a._prepare_X(toy["X"]))
+    b._init_fit(b._prepare_X(other_x))
+    assert not np.allclose(a.theta, b.theta)
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +313,7 @@ def test_check_for_stability_rejects_out_of_range_theta(fitted):
 
 
 def test_check_stopping_criteria_trips_at_max_iterations(toy):
-    model = _make_model(toy, max_iter=3)
+    model = _make_model(toy, max_iter=3, init="random")
     model._init_fit()
     model.nll_trace = [10.0]
     for _ in range(3):
@@ -279,7 +322,7 @@ def test_check_stopping_criteria_trips_at_max_iterations(toy):
 
 
 def test_check_stopping_criteria_trips_on_flat_nll(toy):
-    model = _make_model(toy, max_iter=100, tol=1e-4)
+    model = _make_model(toy, max_iter=100, tol=1e-4, init="random")
     model._init_fit()
     model.nll_trace = [100.0, 100.0]
     model.check_stopping_criteria()

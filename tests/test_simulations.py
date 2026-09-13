@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from src.simulations import __main__ as sim_cli
-from src.simulations.dgp import generate_dataset, q_matrix
+from src.simulations.dgp import generate_dataset, q_matrix, resample_dataset
 from src.simulations.factors import (
     BASELINE,
     FACTOR_LEVELS,
@@ -27,6 +27,7 @@ from src.simulations.run import (
     run_design,
     run_init_repeats,
     run_m_sweep,
+    run_sample_repeats,
     summarize_results,
 )
 
@@ -135,6 +136,29 @@ def test_generate_dataset_is_seed_deterministic():
     assert not np.array_equal(
         np.nan_to_num(a.X, nan=-1), np.nan_to_num(c.X, nan=-1)
     )
+
+
+def test_resample_dataset_keeps_population_and_varies_sample():
+    population = generate_dataset(SMALL, seed=0)
+    a = resample_dataset(population, seed=1)
+    b = resample_dataset(population, seed=2)
+
+    # the population is untouched...
+    np.testing.assert_array_equal(a.mu, population.mu)
+    np.testing.assert_array_equal(a.theta, population.theta)
+    np.testing.assert_array_equal(a.pi, population.pi)
+    np.testing.assert_array_equal(a.Q, population.Q)
+    # ...but the sample (learners, responses) differs between resamples.
+    assert not np.array_equal(a.z, b.z)
+    assert not np.array_equal(np.nan_to_num(a.X, nan=-1), np.nan_to_num(b.X, nan=-1))
+
+
+def test_resample_dataset_is_seed_deterministic():
+    population = generate_dataset(SMALL, seed=0)
+    a = resample_dataset(population, seed=5)
+    b = resample_dataset(population, seed=5)
+    np.testing.assert_array_equal(a.z, b.z)
+    np.testing.assert_array_equal(np.nan_to_num(a.X, nan=-1), np.nan_to_num(b.X, nan=-1))
 
 
 def test_misspecified_q_adds_a_column():
@@ -254,6 +278,26 @@ def test_run_init_repeats_holds_data_fixed_and_varies_only_init():
         assert r.model.mu.shape == (random_only.n_archetypes, random_only.n_skills)
 
 
+def test_run_sample_repeats_holds_population_fixed_and_varies_the_sample():
+    kmeans_cond = SimulationCondition(**{**SMALL.__dict__, "initialization": "k-means"})
+    results = run_sample_repeats(kmeans_cond, population_seed=0, n_repeats=4)
+
+    assert len(results) == 4
+    # every repeat shares the exact same population (true mu/theta/pi/Q)...
+    for r in results[1:]:
+        np.testing.assert_array_equal(r.data.mu, results[0].data.mu)
+        np.testing.assert_array_equal(r.data.theta, results[0].data.theta)
+        np.testing.assert_array_equal(r.data.Q, results[0].data.Q)
+    # ...but not the same drawn sample.
+    assert not all(
+        np.array_equal(np.nan_to_num(r.data.X, nan=-1), np.nan_to_num(results[0].data.X, nan=-1))
+        for r in results[1:]
+    )
+    assert {r.metrics["condition_id"] for r in results} == {kmeans_cond.condition_id()}
+    for r in results:
+        assert r.model.mu.shape == (kmeans_cond.n_archetypes, kmeans_cond.n_skills)
+
+
 def test_run_m_sweep_varies_fitted_m_holding_data_fixed():
     grid = [1, 2, 3]
     results = run_m_sweep(SMALL, n_components_grid=grid, seed=0)
@@ -264,9 +308,12 @@ def test_run_m_sweep_varies_fitted_m_holding_data_fixed():
     x0 = np.nan_to_num(results[0].data.X, nan=-1.0)
     for r in results[1:]:
         np.testing.assert_array_equal(np.nan_to_num(r.data.X, nan=-1.0), x0)
-    # a correctly-specified grid point matches the plain condition_id
+    # a correctly-specified grid point matches the plain condition_id, EXCEPT
+    # that run_m_sweep always forces initialization="random" (required by the
+    # n_components_fit misspecification guard for the other grid points).
     baseline_ix = grid.index(SMALL.n_archetypes)
-    assert results[baseline_ix].metrics["condition_id"] == SMALL.condition_id()
+    expected = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
+    assert results[baseline_ix].metrics["condition_id"] == expected.condition_id()
 
 
 # --------------------------------------------------------------------------- #
