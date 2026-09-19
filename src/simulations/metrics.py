@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import adjusted_rand_score, roc_auc_score
@@ -23,6 +25,38 @@ def permute_rows(arr: np.ndarray, perm: np.ndarray) -> np.ndarray:
     return arr[perm]
 
 
+def repeat_alignment_spread(mu_ests: Sequence[np.ndarray]) -> float:
+    """Self-referential stability metric: spread of repeated `mu` estimates
+    around EACH OTHER, with no ground truth involved.
+
+    Unlike `mu_rmse`/`align_components`'s usual use (aligning an estimate to
+    a KNOWN true `mu`), a real "is this fit stable" check can't peek at the
+    truth -- so this treats `mu_ests[0]` as an arbitrary common reference
+    frame, aligns every other estimate to it (`align_components` works on
+    any two same-shaped matrices, not just true-vs-estimated), stacks the
+    aligned estimates, and returns the same "mean per-skill std across
+    repeats" formula `plot_component_recovery_distribution` uses (viz.py),
+    just self-referential instead of vs.-truth. Requires at least 2
+    estimates, all sharing the same `(n_components, n_skills)` shape --
+    call it once per grid point of an M-sweep (e.g. `run_m_sweep_with_
+    repeats`), not across different `n_components` values.
+    """
+    mu_ests = [np.asarray(m, dtype=float) for m in mu_ests]
+    if len(mu_ests) < 2:
+        raise ValueError("repeat_alignment_spread needs at least 2 estimates")
+    reference = mu_ests[0]
+    aligned = [reference]
+    for mu_est in mu_ests[1:]:
+        if mu_est.shape != reference.shape:
+            raise ValueError(
+                f"all mu_ests must share one shape; got {reference.shape} and {mu_est.shape}"
+            )
+        perm = align_components(reference, mu_est)
+        aligned.append(mu_est[perm])
+    stacked = np.stack(aligned)  # (n_repeats, n_components, n_skills)
+    return float(stacked.std(axis=0).mean())
+
+
 def mu_rmse(mu_true: np.ndarray, mu_est: np.ndarray) -> float:
     k = min(mu_true.shape[1], mu_est.shape[1])
     perm = align_components(mu_true[:, :k], mu_est[:, :k])
@@ -36,6 +70,16 @@ def pi_mae(pi_true: np.ndarray, pi_est: np.ndarray, perm: np.ndarray) -> float:
     pi_est = pi_est.ravel()
     m = min(pi_true.size, perm.size)
     return float(np.mean(np.abs(pi_true[:m] - pi_est[perm[:m]])))
+
+
+def pi_rmse(pi_true: np.ndarray, pi_est: np.ndarray, perm: np.ndarray) -> float:
+    """RMSE version of `pi_mae`, for reporting alongside `mu_rmse`/`theta_rmse`
+    on the same scale (RMSE throughout) rather than mixing MAE and RMSE."""
+    pi_true = pi_true.ravel()
+    pi_est = pi_est.ravel()
+    m = min(pi_true.size, perm.size)
+    diff = pi_true[:m] - pi_est[perm[:m]]
+    return float(np.sqrt(np.mean(diff**2)))
 
 
 def theta_rmse(theta_true: np.ndarray, theta_est: np.ndarray) -> float:

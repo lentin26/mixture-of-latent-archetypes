@@ -22,12 +22,20 @@ from src.simulations.factors import (
     ofat_design,
     replicate_seeds,
 )
+from src.simulations.metrics import pi_rmse, repeat_alignment_spread
 from src.simulations.run import (
+    default_m_grid,
+    fit_mola,
+    pick_m_by_criterion,
     run_condition,
     run_design,
     run_init_repeats,
+    run_m_selection_evaluation,
     run_m_sweep,
+    run_m_sweep_with_repeats,
     run_sample_repeats,
+    split_holdout,
+    summarize_m_sweep,
     summarize_results,
 )
 
@@ -44,6 +52,7 @@ SMALL = SimulationCondition(
 METRIC_KEYS = {
     "mu_rmse",
     "pi_mae",
+    "pi_rmse",
     "theta_rmse",
     "assignment_ari",
     "holdout_auc",
@@ -52,6 +61,8 @@ METRIC_KEYS = {
     "n_em_iters",
     "final_nll",
     "train_time_sec",
+    "init_time_sec",
+    "fit_time_sec",
     "n_observations",
     "seed",
     "condition_id",
@@ -201,8 +212,42 @@ def test_q_matrix_raises_when_distinct_columns_are_structurally_impossible():
 
 
 # --------------------------------------------------------------------------- #
+# metrics.py
+# --------------------------------------------------------------------------- #
+def test_pi_rmse_matches_rmse_formula_and_differs_from_mae():
+    pi_true = np.array([0.5, 0.3, 0.2])
+    pi_est = np.array([0.4, 0.35, 0.25])
+    perm = np.array([0, 1, 2])
+    expected_rmse = np.sqrt(np.mean((pi_true - pi_est) ** 2))
+    expected_mae = np.mean(np.abs(pi_true - pi_est))
+    assert np.isclose(pi_rmse(pi_true, pi_est, perm), expected_rmse)
+    assert not np.isclose(expected_rmse, expected_mae)  # sanity: not accidentally equal here
+
+
+# --------------------------------------------------------------------------- #
 # run.py
 # --------------------------------------------------------------------------- #
+def test_fit_mola_returns_model_and_nonnegative_init_time():
+    data = generate_dataset(SMALL, seed=0)
+    rng = np.random.default_rng(0)
+    X_train, _hold_mask = split_holdout(data.X, SMALL.holdout_frac, rng)
+
+    model, init_time_sec = fit_mola(data, X_train, rng)
+
+    assert init_time_sec >= 0.0
+    assert model.mu.shape == (SMALL.n_archetypes, SMALL.n_skills)
+    assert len(model.nll_trace) > 0
+
+
+def test_score_fit_splits_train_time_into_init_and_fit():
+    metrics = run_condition(SMALL, seed=0)
+
+    assert metrics["init_time_sec"] >= 0.0
+    assert metrics["fit_time_sec"] >= 0.0
+    # exact by construction (a subtraction, not an estimate)
+    assert metrics["init_time_sec"] + metrics["fit_time_sec"] == metrics["train_time_sec"]
+
+
 def test_run_condition_returns_expected_metrics():
     metrics = run_condition(SMALL, seed=0)
 
@@ -257,12 +302,22 @@ def test_summarize_results_aggregates_by_condition():
         assert summary[f"{metric}_n"].iloc[0] == 3
 
 
-def test_kmeans_init_rejects_misspecified_n_components_fit():
+def test_informed_init_rejects_misspecified_n_components_fit():
+    misspecified = SimulationCondition(
+        **{**SMALL.__dict__, "initialization": "informed", "n_components_fit": SMALL.n_archetypes + 1}
+    )
+    with pytest.raises(ValueError, match="initialization='informed'"):
+        run_condition(misspecified, seed=0)
+
+
+def test_kmeans_init_works_with_misspecified_n_components_fit():
+    """Unlike "informed", k-means doesn't assume the correct component count
+    -- it just clusters into however many it's asked for."""
     misspecified = SimulationCondition(
         **{**SMALL.__dict__, "initialization": "k-means", "n_components_fit": SMALL.n_archetypes + 1}
     )
-    with pytest.raises(ValueError, match="initialization='k-means'"):
-        run_condition(misspecified, seed=0)
+    result = run_condition(misspecified, seed=0, return_fit=True)
+    assert result.model.mu.shape[0] == SMALL.n_archetypes + 1
 
 
 def test_run_init_repeats_holds_data_fixed_and_varies_only_init():
@@ -308,12 +363,123 @@ def test_run_m_sweep_varies_fitted_m_holding_data_fixed():
     x0 = np.nan_to_num(results[0].data.X, nan=-1.0)
     for r in results[1:]:
         np.testing.assert_array_equal(np.nan_to_num(r.data.X, nan=-1.0), x0)
-    # a correctly-specified grid point matches the plain condition_id, EXCEPT
-    # that run_m_sweep always forces initialization="random" (required by the
-    # n_components_fit misspecification guard for the other grid points).
+    # a correctly-specified grid point matches the plain condition_id --
+    # run_m_sweep no longer overrides initialization (k-means now tolerates
+    # a misspecified n_components_fit, so nothing needs forcing to "random").
     baseline_ix = grid.index(SMALL.n_archetypes)
-    expected = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
-    assert results[baseline_ix].metrics["condition_id"] == expected.condition_id()
+    assert results[baseline_ix].metrics["condition_id"] == SMALL.condition_id()
+
+
+# --------------------------------------------------------------------------- #
+# choosing M: repeat_alignment_spread, run_m_sweep_with_repeats,
+# default_m_grid, summarize_m_sweep, pick_m_by_criterion,
+# run_m_selection_evaluation
+# --------------------------------------------------------------------------- #
+def test_repeat_alignment_spread_is_near_zero_for_identical_or_permuted_repeats():
+    mu = np.array([[0.2, 0.8, 0.5], [0.7, 0.3, 0.4]])
+    assert repeat_alignment_spread([mu, mu, mu]) < 1e-8
+    # a row-permuted repeat is still "the same answer" once re-aligned
+    assert repeat_alignment_spread([mu, mu[::-1]]) < 1e-8
+
+
+def test_repeat_alignment_spread_is_nonzero_for_noisy_repeats():
+    rng = np.random.default_rng(0)
+    mu = np.array([[0.2, 0.8, 0.5], [0.7, 0.3, 0.4]])
+    noisy = [mu + rng.normal(0.0, 0.05, mu.shape) for _ in range(5)]
+    assert repeat_alignment_spread(noisy) > 0.01
+
+
+def test_repeat_alignment_spread_requires_at_least_two_estimates():
+    with pytest.raises(ValueError, match="at least 2"):
+        repeat_alignment_spread([np.zeros((2, 3))])
+
+
+def test_run_m_sweep_with_repeats_holds_data_fixed_across_m_and_repeats():
+    grid = [1, 2, 3]
+    n_repeats = 3
+    results = run_m_sweep_with_repeats(SMALL, grid, data_seed=0, n_repeats=n_repeats)
+
+    assert len(results) == len(grid) * n_repeats
+    assert [r.metrics["n_components_fit"] for r in results] == [
+        m for m in grid for _ in range(n_repeats)
+    ]
+    x0 = np.nan_to_num(results[0].data.X, nan=-1.0)
+    for r in results[1:]:
+        np.testing.assert_array_equal(np.nan_to_num(r.data.X, nan=-1.0), x0)
+
+
+def test_default_m_grid_spans_below_and_above_true_m():
+    grid = default_m_grid(4)
+    assert min(grid) < 4 < max(grid)
+
+    grid16 = default_m_grid(16)
+    assert max(grid16) >= 16
+    assert min(grid16) < 16
+
+    # doesn't fall over at the smallest possible true M
+    assert default_m_grid(1) == sorted(set(default_m_grid(1)))
+    assert min(default_m_grid(1)) >= 1
+
+
+def test_summarize_m_sweep_one_row_per_grid_point():
+    grid = [1, 2, 3]
+    kmeans_cond = SimulationCondition(**{**SMALL.__dict__, "initialization": "k-means"})
+    random_cond = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
+    kmeans_results = run_m_sweep(kmeans_cond, grid, seed=0)
+    random_repeat_results = run_m_sweep_with_repeats(random_cond, grid, data_seed=0, n_repeats=2)
+
+    m_summary = summarize_m_sweep(kmeans_results, random_repeat_results)
+
+    assert len(m_summary) == len(grid)
+    assert m_summary["n_components_fit"].tolist() == grid
+    for col in (
+        "holdout_auc", "holdout_nll", "effective_n_archetypes",
+        "effective_n_components", "weight_min", "closest_pair_distance", "mu_spread",
+    ):
+        assert col in m_summary.columns
+
+
+def test_pick_m_by_criterion_returns_all_expected_keys():
+    grid = [1, 2, 3]
+    kmeans_cond = SimulationCondition(**{**SMALL.__dict__, "initialization": "k-means"})
+    random_cond = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
+    m_summary = summarize_m_sweep(
+        run_m_sweep(kmeans_cond, grid, seed=0),
+        run_m_sweep_with_repeats(random_cond, grid, data_seed=0, n_repeats=2),
+    )
+
+    m_hats = pick_m_by_criterion(m_summary)
+
+    expected_keys = {
+        "predictive_auc", "predictive_nll", "stability",
+        "separation_saturation", "separation_threshold",
+        "mass_saturation", "mass_threshold",
+    }
+    assert set(m_hats) == expected_keys
+    for m_hat in m_hats.values():
+        assert isinstance(m_hat, int)
+
+
+def test_run_m_selection_evaluation_row_count_and_columns():
+    evaluation = run_m_selection_evaluation(
+        n_archetypes_grid=(2, 3),
+        separation_grid=("low",),
+        seeds=(0,),
+        n_repeats=2,
+        n_grid_points=3,
+    )
+
+    n_criteria = 7
+    assert len(evaluation) == 2 * 1 * 1 * n_criteria
+    for col in (
+        "n_archetypes", "archetype_separation", "seed",
+        "criterion", "m_hat", "error", "exact_match",
+    ):
+        assert col in evaluation.columns
+    assert set(evaluation["n_archetypes"]) == {2, 3}
+    np.testing.assert_array_equal(
+        evaluation["error"], evaluation["m_hat"] - evaluation["n_archetypes"]
+    )
 
 
 # --------------------------------------------------------------------------- #
