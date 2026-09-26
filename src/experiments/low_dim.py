@@ -166,12 +166,12 @@ def fit_mola(splits, Q_df):
 
     return final_results
 
-def plot_calibrations(final_results, model_names, n_bins=10):
+def plot_calibrations(final_results, model_names, n_bins=10, save=None):
     
     colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
 
     # Create 2x2 layout
-    fig, axes = plt.subplots(2, 2, figsize=(6, 6))
+    fig, axes = plt.subplots(1, 4, figsize=(12, 4), sharey=True)
     axes = axes.flatten()
 
     for i, model_name in enumerate(model_names):
@@ -242,12 +242,18 @@ def plot_calibrations(final_results, model_names, n_bins=10):
         ax.set_ylim(0, 1)
         ax.set_aspect('equal', adjustable='box')
         ax.set_title(model_name)
-        ax.set_xlabel('Predicted Probability')
-        ax.set_ylabel('Observed Frequency')
+        # ax.set_ylabel('Observed Frequency')
         ax.grid(True, linestyle=':', alpha=0.6)
+
+    fig.supylabel('Observed Frequency')
+    fig.supxlabel('Predicted Probability')
 
     # Remove unused axes if fewer than 4 models
     for j in range(len(model_names), len(axes)):
         fig.delaxes(axes[j])
 
     plt.tight_layout()
+
+    # save figure
+    if save is not None:
+        fig.savefig(save)

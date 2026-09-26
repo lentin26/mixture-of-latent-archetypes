@@ -19,3 +19,12 @@ pytest>=8.0
 # requests>=2.31
 # pyreadr>=0.5
 # rpy2>=3.5
+
+# Optional: only needed by src/utils/ednet (downloads EdNet-KT1 from
+# Google Drive -- gdown handles Drive's large-file confirmation page,
+# which plain `requests` can't).
+# gdown>=5.2
+
+# Optional: only needed by src/cdm/neural_cdm (NeuralCDM baseline on EdNet).
+# EduCDM>=0.0.13
+# torch>=2.0

@@ -39,7 +39,7 @@ from src.simulations.metrics import align_components
 from src.simulations.run import SimulationResult
 from src.style import humanize_label
 
-ASSUMED_KW = dict(color="#1f77b4", marker="o", markersize=4, linewidth=1.8, label="assumed")
+ASSUMED_KW = dict(color="black", marker="o", markersize=4, linewidth=1.8, label="Assumed")
 RECOVERED_KW = dict(
     color="#d62728", marker="x", markersize=5, linewidth=1.8, linestyle="--",
     label="recovered",
@@ -163,9 +163,9 @@ def _skill_axis(n_skills: int, skill_labels: Sequence | None):
 def _style_profile_axes(ax, x, skill_labels, *, ylabel=True, xlabel=True):
     ax.set_ylim(-0.03, 1.03)
     if xlabel:
-        ax.set_xlabel("skill index")
+        ax.set_xlabel("Skill Index")
     if ylabel:
-        ax.set_ylabel("proficiency  P(skill mastered)")
+        ax.set_ylabel("Proficiency, P(skill mastered)")
     ax.grid(alpha=0.3, linewidth=0.6)
     if skill_labels is not None:
         ax.set_xticks(x)
@@ -469,6 +469,154 @@ def _mark_reference_level(ax, x_position: float) -> None:
     ax.axvline(x_position, color="0.6", linestyle=":", linewidth=1)
 
 
+def _resolve_group_colors(names, group_colors: dict[str, str] | None) -> dict:
+    """Maps each name in `names` to a color: `group_colors[name]` if given,
+    else the next unused color off a `tab10` cycle. Shared by every
+    `groups=`-mode recovery plot so the same group always gets the same
+    color absent an explicit override.
+    """
+    default_colors = plt.get_cmap("tab10")(np.linspace(0, 1, 10))
+    return {name: (group_colors or {}).get(name, default_colors[idx % 10]) for idx, name in enumerate(names)}
+
+
+def _prepare_component_groups(
+    groups: dict[str, Sequence[SimulationResult]],
+) -> tuple[np.ndarray, dict[str, list[np.ndarray]]]:
+    """Validates every group's true `mu` matches the first group's first
+    result, and returns `(mu_true, group_mu_ests)` -- the `groups=`-mode
+    data prep shared by `plot_component_recovery_distribution` and
+    `plot_recovery_distribution`.
+    """
+    group_items = list(groups.items())
+    mu_true = _as_matrix(group_items[0][1][0].data.mu)
+    group_mu_ests = {name: [_as_matrix(r.model.mu) for r in res] for name, res in group_items}
+    for name, res in group_items[1:]:
+        if not np.allclose(_as_matrix(res[0].data.mu), mu_true):
+            raise ValueError(
+                f"group {name!r} does not share the same true mu as the first group -- "
+                f"groups must be repeated fits of the SAME dataset, not different ones"
+            )
+    return mu_true, group_mu_ests
+
+
+def _align_component_groups(
+    mu_true: np.ndarray, group_mu_ests: dict[str, list[np.ndarray]]
+) -> tuple[list[dict[str, list[np.ndarray]]], list[int], int]:
+    """Hungarian-aligns every group's recovered `mu` rows to the true
+    components. Returns `(per_component, matched, k)`:
+    `per_component[i][group_name]` is that group's list of aligned rows for
+    true component `i`; `matched` is the component indices any group
+    actually has data for; `k` is the shared skill-column count.
+    """
+    n_true = mu_true.shape[0]
+    k = min(mu_true.shape[1], min(m.shape[1] for ests in group_mu_ests.values() for m in ests))
+    per_component: list[dict[str, list[np.ndarray]]] = [
+        {name: [] for name in group_mu_ests} for _ in range(n_true)
+    ]
+    for name, ests in group_mu_ests.items():
+        for mu_est in ests:
+            perm = align_components(mu_true[:, :k], mu_est[:, :k])
+            n_matched = min(n_true, perm.size)
+            for i in range(n_matched):
+                per_component[i][name].append(mu_est[perm[i], :k])
+    matched = [i for i, groupmap in enumerate(per_component) if any(groupmap.values())]
+    return per_component, matched, k
+
+
+def _draw_component_panel(ax, per_component_i, mu_true_row, x, labels, resolved_colors, *, title, ylabel, xlabel):
+    """Draws one `plot_component_recovery_distribution`-style panel (thin
+    translucent repeat curves + bold median per group, true profile via
+    `ASSUMED_KW`) into `ax`. Shared by `plot_component_recovery_distribution`
+    and `plot_recovery_distribution` so the two draw identical panels.
+    """
+    for name, curves_list in per_component_i.items():
+        if not curves_list:
+            continue
+        curves = np.stack(curves_list)  # (n_repeats, k)
+        color = resolved_colors[name]
+        for curve in curves:
+            ax.plot(x, curve, color=color, alpha=0.15, linewidth=1)
+        ax.plot(x, np.median(curves, axis=0), color=color, linewidth=2, linestyle="--", label=name)
+    ax.plot(x, mu_true_row, **ASSUMED_KW)
+    ax.set_title(title, fontsize=9)
+    _style_profile_axes(ax, x, labels, ylabel=ylabel, xlabel=xlabel)
+
+
+def _compute_theta_pi_groups(
+    groups: dict[str, Sequence[SimulationResult]], data_mu_true: np.ndarray, difficulty: bool
+) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """Pools every group's (true, recovered) `theta` and `pi` pairs across
+    repeats. `pi` is aligned via each repeat's own Hungarian permutation
+    against `data_mu_true` (see `plot_theta_pi_recovery_distribution`'s
+    docstring). Shared by that function and `plot_recovery_distribution`.
+    """
+    group_theta: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    group_pi: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for name, results in groups.items():
+        th_true = np.concatenate([np.asarray(r.data.theta, dtype=float).ravel() for r in results])
+        th_est = np.concatenate([np.asarray(r.model.theta, dtype=float).ravel() for r in results])
+        if difficulty:
+            th_true, th_est = 1.0 - th_true, 1.0 - th_est
+        group_theta[name] = (th_true, th_est)
+
+        pi_true_parts, pi_est_parts = [], []
+        for r in results:
+            perm = align_components(data_mu_true, _as_matrix(r.model.mu))
+            pi_true = np.asarray(r.data.pi, dtype=float).ravel()
+            pi_est = np.asarray(r.model.pi, dtype=float).ravel()
+            m = min(pi_true.size, perm.size)
+            pi_true_parts.append(pi_true[:m])
+            pi_est_parts.append(pi_est[perm[:m]])
+        group_pi[name] = (np.concatenate(pi_true_parts), np.concatenate(pi_est_parts))
+    return group_theta, group_pi
+
+
+def _draw_theta_pi_panels(
+    theta_ax, pi_ax, group_theta, group_pi, resolved_colors, *,
+    difficulty: bool, equal_aspect: bool = True, legend: bool = True,
+):
+    """Draws the difficulty and mixture-weight scatter panels
+    `plot_theta_pi_recovery_distribution` and `plot_recovery_distribution`
+    both use -- translucent pooled points per group, a `y = x` reference
+    line. ``equal_aspect`` defaults to `True` (right for the standalone
+    function's own 2-panel figure, sized to fit); `plot_recovery_distribution`
+    passes `False` -- forcing a square aspect inside a shared-width grid
+    column next to non-square profile panels squeezes these panels down to
+    a fraction of their column under `tight_layout`, confirmed by rendering
+    it. ``legend`` likewise defaults to `True` for standalone use;
+    `plot_recovery_distribution` passes `False` since it draws one shared
+    legend instead of a redundant one per panel.
+    """
+    for name, (th_true, th_est) in group_theta.items():
+        theta_ax.scatter(th_true, th_est, s=14, alpha=0.15, color=resolved_colors[name], label=name)
+    theta_ax.plot([0, 1], [0, 1], color="0.4", linewidth=1, linestyle=":")
+    theta_ax.set_xlim(0, 1)
+    theta_ax.set_ylim(0, 1)
+    xlab = "Difficulty" if difficulty else "Easiness (theta)"
+    theta_ax.set_xlabel(f"Assumed Item {xlab}")
+    theta_ax.set_ylabel(f"Recovered Item {xlab}")
+    if equal_aspect:
+        theta_ax.set_aspect("equal")
+    theta_ax.grid(alpha=0.3, linewidth=0.6)
+    if legend:
+        theta_ax.legend(fontsize=8)
+
+    pi_all = np.concatenate([v for pair in group_pi.values() for v in pair])
+    pi_lims = [0.0, float(pi_all.max()) * 1.15]
+    for name, (pi_true, pi_est) in group_pi.items():
+        pi_ax.scatter(pi_true, pi_est, s=28, alpha=0.3, color=resolved_colors[name], label=name)
+    pi_ax.plot(pi_lims, pi_lims, color="0.4", linewidth=1, linestyle=":")
+    pi_ax.set_xlim(pi_lims)
+    pi_ax.set_ylim(pi_lims)
+    pi_ax.set_xlabel("Assumed Mixture Weight")
+    pi_ax.set_ylabel("Recovered Mixture Weight")
+    if equal_aspect:
+        pi_ax.set_aspect("equal")
+    pi_ax.grid(alpha=0.3, linewidth=0.6)
+    if legend:
+        pi_ax.legend(fontsize=8)
+
+
 def plot_component_recovery_distribution(
     results: Sequence[SimulationResult] | None = None,
     *,
@@ -510,7 +658,7 @@ def plot_component_recovery_distribution(
     Mutually exclusive with ``results``/``mu_true``+``mu_ests`` (the
     original single-group convention, unchanged).
 
-    Panel titles are just ``"component {i}"`` -- sample size and spread are
+    Panel titles are just ``"Component {i}"`` -- sample size and spread are
     left to be reported in text/a table alongside the figure (e.g. via
     :func:`src.simulations.metrics.repeat_alignment_spread`) rather than
     baked into the image; ``repeat_label`` (default ``"inits"``, pass
@@ -520,15 +668,7 @@ def plot_component_recovery_distribution(
     repeated per panel. Returns the :class:`matplotlib.figure.Figure`.
     """
     if groups is not None:
-        group_items = list(groups.items())
-        mu_true = _as_matrix(group_items[0][1][0].data.mu)
-        group_mu_ests = {name: [_as_matrix(r.model.mu) for r in res] for name, res in group_items}
-        for name, res in group_items[1:]:
-            if not np.allclose(_as_matrix(res[0].data.mu), mu_true):
-                raise ValueError(
-                    f"group {name!r} does not share the same true mu as the first group -- "
-                    f"groups must be repeated fits of the SAME dataset, not different ones"
-                )
+        mu_true, group_mu_ests = _prepare_component_groups(groups)
     elif results is not None:
         mu_true = _as_matrix(results[0].data.mu)
         group_mu_ests = {repeat_label: [_as_matrix(r.model.mu) for r in results]}
@@ -538,20 +678,7 @@ def plot_component_recovery_distribution(
         mu_true = _as_matrix(mu_true)
         group_mu_ests = {repeat_label: [_as_matrix(m) for m in mu_ests]}
 
-    n_true = mu_true.shape[0]
-    k = min(mu_true.shape[1], min(m.shape[1] for ests in group_mu_ests.values() for m in ests))
-    # per_component[i][group_name] = list of that group's aligned mu_est rows
-    per_component: list[dict[str, list[np.ndarray]]] = [
-        {name: [] for name in group_mu_ests} for _ in range(n_true)
-    ]
-    for name, ests in group_mu_ests.items():
-        for mu_est in ests:
-            perm = align_components(mu_true[:, :k], mu_est[:, :k])
-            n_matched = min(n_true, perm.size)
-            for i in range(n_matched):
-                per_component[i][name].append(mu_est[perm[i], :k])
-
-    matched = [i for i, groupmap in enumerate(per_component) if any(groupmap.values())]
+    per_component, matched, k = _align_component_groups(mu_true, group_mu_ests)
     x, labels = _skill_axis(k, skill_labels)
     ncols = min(max_cols, len(matched))
     nrows = math.ceil(len(matched) / ncols)
@@ -561,31 +688,17 @@ def plot_component_recovery_distribution(
         squeeze=False, sharex=True, sharey=True,
     )
     flat = axes.ravel()
-
-    default_colors = plt.get_cmap("tab10")(np.linspace(0, 1, 10))
-    resolved_colors = {
-        name: (group_colors or {}).get(name, default_colors[idx % 10])
-        for idx, name in enumerate(group_mu_ests)
-    }
+    resolved_colors = _resolve_group_colors(group_mu_ests, group_colors)
 
     for panel, i in enumerate(matched):
-        ax = flat[panel]
-        for name, curves_list in per_component[i].items():
-            if not curves_list:
-                continue
-            curves = np.stack(curves_list)  # (n_repeats, k)
-            color = resolved_colors[name]
-            for curve in curves:
-                ax.plot(x, curve, color=color, alpha=0.15, linewidth=1)
-            ax.plot(x, np.median(curves, axis=0), color=color,
-                     linewidth=2, linestyle="--", label=name)
-        ax.plot(x, mu_true[i, :k], **ASSUMED_KW)
-        ax.set_title(f"component {i}", fontsize=9)
-        _style_profile_axes(ax, x, labels, ylabel=(panel % ncols == 0), xlabel=False)
+        _draw_component_panel(
+            flat[panel], per_component[i], mu_true[i, :k], x, labels, resolved_colors,
+            title=f"Component {i}", ylabel=(panel % ncols == 0), xlabel=False,
+        )
     for j in range(len(matched), len(flat)):
         flat[j].set_visible(False)
     flat[0].legend(fontsize=8, loc="lower right")
-    fig.supxlabel("skill index", fontsize=9)
+    fig.supxlabel("Skill Index", fontsize=9)
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)
@@ -623,60 +736,279 @@ def plot_theta_pi_recovery_distribution(
     """
     group_items = list(groups.items())
     data_mu_true = _as_matrix(group_items[0][1][0].data.mu)
-
-    default_colors = plt.get_cmap("tab10")(np.linspace(0, 1, 10))
-    resolved_colors = {
-        name: (group_colors or {}).get(name, default_colors[idx % 10])
-        for idx, name in enumerate(groups)
-    }
-
-    group_theta: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    group_pi: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for name, results in group_items:
-        th_true = np.concatenate([np.asarray(r.data.theta, dtype=float).ravel() for r in results])
-        th_est = np.concatenate([np.asarray(r.model.theta, dtype=float).ravel() for r in results])
-        if difficulty:
-            th_true, th_est = 1.0 - th_true, 1.0 - th_est
-        group_theta[name] = (th_true, th_est)
-
-        pi_true_parts, pi_est_parts = [], []
-        for r in results:
-            perm = align_components(data_mu_true, _as_matrix(r.model.mu))
-            pi_true = np.asarray(r.data.pi, dtype=float).ravel()
-            pi_est = np.asarray(r.model.pi, dtype=float).ravel()
-            m = min(pi_true.size, perm.size)
-            pi_true_parts.append(pi_true[:m])
-            pi_est_parts.append(pi_est[perm[:m]])
-        group_pi[name] = (np.concatenate(pi_true_parts), np.concatenate(pi_est_parts))
+    resolved_colors = _resolve_group_colors(groups, group_colors)
+    group_theta, group_pi = _compute_theta_pi_groups(groups, data_mu_true, difficulty)
 
     fig, (theta_ax, pi_ax) = plt.subplots(1, 2, figsize=figsize or (8.0, 4.0))
-
-    for name, (th_true, th_est) in group_theta.items():
-        theta_ax.scatter(th_true, th_est, s=14, alpha=0.15, color=resolved_colors[name], label=name)
-    theta_ax.plot([0, 1], [0, 1], color="0.4", linewidth=1, linestyle=":")
-    theta_ax.set_xlim(0, 1)
-    theta_ax.set_ylim(0, 1)
-    xlab = "difficulty" if difficulty else "easiness (theta)"
-    theta_ax.set_xlabel(f"assumed item {xlab}")
-    theta_ax.set_ylabel(f"recovered item {xlab}")
-    theta_ax.set_aspect("equal")
-    theta_ax.grid(alpha=0.3, linewidth=0.6)
-    theta_ax.legend(fontsize=8)
-
-    pi_all = np.concatenate([v for pair in group_pi.values() for v in pair])
-    pi_lims = [0.0, float(pi_all.max()) * 1.15]
-    for name, (pi_true, pi_est) in group_pi.items():
-        pi_ax.scatter(pi_true, pi_est, s=28, alpha=0.3, color=resolved_colors[name], label=name)
-    pi_ax.plot(pi_lims, pi_lims, color="0.4", linewidth=1, linestyle=":")
-    pi_ax.set_xlim(pi_lims)
-    pi_ax.set_ylim(pi_lims)
-    pi_ax.set_xlabel("assumed mixture weight")
-    pi_ax.set_ylabel("recovered mixture weight")
-    pi_ax.set_aspect("equal")
-    pi_ax.grid(alpha=0.3, linewidth=0.6)
-    pi_ax.legend(fontsize=8)
+    _draw_theta_pi_panels(theta_ax, pi_ax, group_theta, group_pi, resolved_colors, difficulty=difficulty)
 
     fig.tight_layout()
+    if save is not None:
+        _savefig(fig, save)
+    return fig
+
+
+def plot_recovery_distribution(
+    groups: dict[str, Sequence[SimulationResult]],
+    *,
+    group_colors: dict[str, str] | None = None,
+    difficulty: bool = True,
+    skill_labels: Sequence | None = None,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+):
+    """One figure combining :func:`plot_component_recovery_distribution`'s
+    per-archetype skill-profile panels with
+    :func:`plot_theta_pi_recovery_distribution`'s difficulty/mixture-weight
+    scatter panels, for telling a single recovery-stability story (e.g.
+    "random and k-means both recover the assumed parameters, but k-means is
+    tighter") without asking the reader to compare two separate figures.
+
+    Reuses both functions' data prep and per-panel drawing code exactly
+    (``_prepare_component_groups``, ``_align_component_groups``,
+    ``_draw_component_panel``, ``_compute_theta_pi_groups``,
+    ``_draw_theta_pi_panels``) -- this is a different *layout* of the same
+    computations, not a different computation. ``groups`` (e.g.
+    ``{"Random": random_results, "K-means": kmeans_results}``) must share
+    one true ``mu`` across every group's first result (see
+    :func:`plot_component_recovery_distribution`'s ``groups`` docstring for
+    the exact rule and error).
+
+    Grid: always 3 columns. The component panels (``"Component {i}"``, same
+    thin-repeat/bold-median/true-profile convention as the standalone
+    function) fill columns 0-1 across ``ceil(n_matched / 2)`` rows (a 2x2
+    block for the usual 4-archetype case). Column 2 holds the difficulty
+    scatter (row 0) and mixture-weight scatter (row 1), stacked -- not
+    sharing a row with the components the way an earlier layout had them.
+    Columns 0-1 are wider than column 2 (``WIDTH_RATIO`` > 1, a plain
+    ``matplotlib.gridspec.GridSpec(..., width_ratios=...)``, rows left
+    equal): the component panels read better wider than tall (a profile
+    over a many-valued skill index), while the scatter panels read better
+    close to square (a `y = x` comparison) -- a narrower column 2 with the
+    same row height gets closer to square there while widening the
+    component panels at the same time. Component panels share one x/y axis
+    within their own block (tick labels only on the bottom-left one --
+    they all cover the identical range, so repeating the ticks four times
+    over is redundant ink) but are NOT shared with column 2: the component
+    panels' x-axis is a skill index, the scatter panels' x-axis is a
+    probability, so a shared scale would be wrong for at least one of the
+    two panel types. One legend, collected from the component panels'
+    handles (every group's median line plus "assumed") and drawn once as a
+    horizontal row below the whole figure rather than inside any one
+    panel. Returns the :class:`matplotlib.figure.Figure`.
+    """
+    mu_true, group_mu_ests = _prepare_component_groups(groups)
+    per_component, matched, k = _align_component_groups(mu_true, group_mu_ests)
+    x, labels = _skill_axis(k, skill_labels)
+    resolved_colors = _resolve_group_colors(groups, group_colors)
+    group_theta, group_pi = _compute_theta_pi_groups(groups, mu_true, difficulty)
+
+    n_matched = len(matched)
+    comp_cols = 2
+    comp_rows = math.ceil(n_matched / comp_cols)
+    total_rows = max(comp_rows, 2)  # column 2 always needs 2 rows (difficulty, mixture weight)
+    total_cols = comp_cols + 1
+
+    # Column widths: component columns wider than the scatter column
+    # (WIDTH_RATIO > 1), tuned by rendering rather than solved exactly --
+    # solving for an exact square scatter panel forces a much shorter
+    # total figure height at this figure's fixed (page-driven) width,
+    # which risks clipping the y-axis label again (confirmed last round).
+    WIDTH_RATIO = 1.3
+    width_ratios = [WIDTH_RATIO, WIDTH_RATIO, 1.0]
+
+    fig = plt.figure(figsize=figsize or (3.2 * comp_cols, 3.0 * total_rows))
+    gs = fig.add_gridspec(total_rows, total_cols, width_ratios=width_ratios)
+
+    component_axes = []
+    for panel in range(n_matched):
+        share_with = component_axes[0] if component_axes else None
+        row, col = divmod(panel, comp_cols)
+        component_axes.append(fig.add_subplot(gs[row, col], sharex=share_with, sharey=share_with))
+
+    last_component_row = comp_rows - 1
+    for panel, i in enumerate(matched):
+        row, col = divmod(panel, comp_cols)
+        ax = component_axes[panel]
+        _draw_component_panel(
+            ax, per_component[i], mu_true[i, :k], x, labels, resolved_colors,
+            # ylabel=False on every panel -- fig.supylabel(...) below carries
+            # the "Recovered Proficiency" label for the whole figure instead
+            # of any one panel (a per-panel ylabel here would duplicate it
+            # and, worse, collide across rows the way it used to before that
+            # -- putting the same long rotated text on every column-0 panel
+            # of a multi-row block runs them into each other).
+            title=f"Component {i}", ylabel=False, xlabel=(row == last_component_row),
+        )
+        if col != 0:
+            plt.setp(ax.get_yticklabels(), visible=False)
+        if row != last_component_row:
+            plt.setp(ax.get_xticklabels(), visible=False)
+
+    theta_ax = fig.add_subplot(gs[0, comp_cols])
+    pi_ax = fig.add_subplot(gs[1, comp_cols])
+    _draw_theta_pi_panels(
+        theta_ax, pi_ax, group_theta, group_pi, resolved_colors,
+        difficulty=difficulty, equal_aspect=False, legend=False,
+    )
+
+    handles, labels_ = component_axes[0].get_legend_handles_labels()
+    fig.supylabel('Recovered Proficiency')
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    fig.legend(
+        handles, labels_, loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=len(labels_), frameon=False, fontsize=8,
+    )
+    if save is not None:
+        _savefig(fig, save)
+    return fig
+
+
+def plot_recovery_distribution_comparison(
+    left_groups: dict[str, Sequence[SimulationResult]],
+    right_groups: dict[str, Sequence[SimulationResult]],
+    *,
+    left_title: str,
+    right_title: str,
+    left_colors: dict[str, str] | None = None,
+    right_colors: dict[str, str] | None = None,
+    difficulty: bool = True,
+    skill_labels: Sequence | None = None,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+):
+    """Two :func:`plot_recovery_distribution`-style panels shown side by
+    side, one column each, for direct comparison between two different
+    experiments -- e.g. 2a-continued's initialization-scheme groups next
+    to 2b's resampling groups. Each archetype gets its own ROW (unlike
+    `plot_recovery_distribution`'s 2x2 block), split left/right with NO
+    gap between the two columns (``wspace=0``, plus a vertical divider
+    line marking the boundary) so a row reads as one continuous
+    comparison rather than two unrelated panels sitting next to each
+    other. Two more rows below hold difficulty and mixture-weight, split
+    the same way.
+
+    ``left_groups``/``right_groups`` are independent datasets -- unlike
+    `plot_recovery_distribution`'s single ``groups``, they are NOT
+    required to share one true ``mu`` (this function exists for exactly
+    the case where they don't: two different experiments, not two
+    schemes fit to the same dataset). They must have the same NUMBER of
+    matched archetypes, so each row pairs the same true-archetype index
+    on both sides. Each side keeps its own legend (its own group
+    names/colors) below its own half of the figure, rather than one
+    shared legend -- the two sides' groups are not meant to be read as
+    directly comparable to each other the way groups within one side are.
+    ``left_title``/``right_title`` are drawn once each above their
+    column, since with zero gap and shared row labels nothing else on the
+    figure says the two halves are different experiments. Returns the
+    :class:`matplotlib.figure.Figure`.
+    """
+    left_mu_true, left_mu_ests = _prepare_component_groups(left_groups)
+    right_mu_true, right_mu_ests = _prepare_component_groups(right_groups)
+    left_per_component, left_matched, left_k = _align_component_groups(left_mu_true, left_mu_ests)
+    right_per_component, right_matched, right_k = _align_component_groups(right_mu_true, right_mu_ests)
+    if len(left_matched) != len(right_matched):
+        raise ValueError(
+            f"left_groups has {len(left_matched)} matched archetypes but right_groups has "
+            f"{len(right_matched)} -- plot_recovery_distribution_comparison pairs them row by "
+            f"row, so both sides need the same count"
+        )
+    left_x, left_labels = _skill_axis(left_k, skill_labels)
+    right_x, right_labels = _skill_axis(right_k, skill_labels)
+    left_resolved = _resolve_group_colors(left_groups, left_colors)
+    right_resolved = _resolve_group_colors(right_groups, right_colors)
+    left_theta, left_pi = _compute_theta_pi_groups(left_groups, left_mu_true, difficulty)
+    right_theta, right_pi = _compute_theta_pi_groups(right_groups, right_mu_true, difficulty)
+
+    n_components = len(left_matched)
+    n_rows = n_components + 2  # + difficulty row + mixture-weight row
+
+    fig = plt.figure(figsize=figsize or (7.0, 2.2 * n_rows))
+    gs = fig.add_gridspec(n_rows, 2, wspace=0.0)
+
+    left_axes, right_axes = [], []
+    for row in range(n_components):
+        i, j = left_matched[row], right_matched[row]
+        share_left = left_axes[0] if left_axes else None
+        lax = fig.add_subplot(gs[row, 0], sharex=share_left, sharey=share_left)
+        rax = fig.add_subplot(gs[row, 1], sharex=lax, sharey=lax)
+        left_axes.append(lax)
+        right_axes.append(rax)
+
+        is_last = row == n_components - 1
+        _draw_component_panel(
+            lax, left_per_component[i], left_mu_true[i, :left_k], left_x, left_labels, left_resolved,
+            title="", ylabel=(row == 0), xlabel=is_last,
+        )
+        _draw_component_panel(
+            rax, right_per_component[j], right_mu_true[j, :right_k], right_x, right_labels, right_resolved,
+            title="", ylabel=False, xlabel=is_last,
+        )
+        plt.setp(rax.get_yticklabels(), visible=False)
+        if not is_last:
+            plt.setp(lax.get_xticklabels(), visible=False)
+            plt.setp(rax.get_xticklabels(), visible=False)
+
+    theta_row, pi_row = n_components, n_components + 1
+    left_theta_ax = fig.add_subplot(gs[theta_row, 0])
+    right_theta_ax = fig.add_subplot(gs[theta_row, 1], sharey=left_theta_ax)
+    left_pi_ax = fig.add_subplot(gs[pi_row, 0])
+    right_pi_ax = fig.add_subplot(gs[pi_row, 1], sharey=left_pi_ax)
+    _draw_theta_pi_panels(
+        left_theta_ax, left_pi_ax, left_theta, left_pi, left_resolved,
+        difficulty=difficulty, equal_aspect=False, legend=False,
+    )
+    _draw_theta_pi_panels(
+        right_theta_ax, right_pi_ax, right_theta, right_pi, right_resolved,
+        difficulty=difficulty, equal_aspect=False, legend=False,
+    )
+    plt.setp(right_theta_ax.get_yticklabels(), visible=False)
+    plt.setp(right_pi_ax.get_yticklabels(), visible=False)
+    right_theta_ax.set_ylabel("")
+    right_pi_ax.set_ylabel("")
+
+    all_left_axes = left_axes + [left_theta_ax, left_pi_ax]
+    all_right_axes = right_axes + [right_theta_ax, right_pi_ax]
+    row_titles = [f"Component {i}" for i in left_matched] + ["Item Difficulty", "Mixture Weight"]
+
+    left_handles, left_labels_ = left_axes[0].get_legend_handles_labels()
+    right_handles, right_labels_ = right_axes[0].get_legend_handles_labels()
+
+    fig.tight_layout(rect=(0.0, 0.12, 1.0, 0.93))
+
+    for lax, rax, title in zip(all_left_axes, all_right_axes, row_titles):
+        lpos, rpos = lax.get_position(), rax.get_position()
+        fig.text((lpos.x0 + rpos.x1) / 2, lpos.y1 + 0.004, title, ha="center", va="bottom", fontsize=9)
+
+    top_y = all_left_axes[0].get_position().y1
+    bottom_y = all_left_axes[-1].get_position().y0
+    divider_x = (left_axes[0].get_position().x1 + right_axes[0].get_position().x0) / 2
+    fig.add_artist(plt.Line2D(
+        [divider_x, divider_x], [bottom_y, top_y],
+        color="0.6", linewidth=1, transform=fig.transFigure,
+    ))
+
+    left_x_center = (left_axes[0].get_position().x0 + left_axes[0].get_position().x1) / 2
+    right_x_center = (right_axes[0].get_position().x0 + right_axes[0].get_position().x1) / 2
+    fig.text(left_x_center, 0.97, left_title, ha="center", fontsize=10, fontweight="bold")
+    fig.text(right_x_center, 0.97, right_title, ha="center", fontsize=10, fontweight="bold")
+
+    # Anchored to each side's OUTER edge (not its center), wrapped to 2
+    # columns instead of one row per side -- confirmed by rendering it that
+    # a single wide row (ncol=len(labels)) doesn't fit within one column's
+    # width once there are 4 entries, and the two legends collide in the
+    # middle.
+    left_edge = left_axes[0].get_position().x0
+    right_edge = right_axes[0].get_position().x1
+    fig.legend(
+        left_handles, left_labels_, loc="lower left", bbox_to_anchor=(left_edge, 0.0),
+        ncol=2, frameon=False, fontsize=8,
+    )
+    fig.legend(
+        right_handles, right_labels_, loc="lower right", bbox_to_anchor=(right_edge, 0.0),
+        ncol=2, frameon=False, fontsize=8,
+    )
+
     if save is not None:
         _savefig(fig, save)
     return fig
@@ -887,7 +1219,7 @@ def plot_ofat_sensitivity(
             )
         for j in range(len(factors), len(flat)):
             flat[j].set_visible(False)
-        fig.suptitle(f"OFAT Sensitivity: {humanize_label(metrics[0], label_map)}", fontsize=12)
+        # fig.suptitle(f"OFAT Sensitivity: {humanize_label(metrics[0], label_map)}", fontsize=12)
 
     fig.tight_layout()
     if save is not None:

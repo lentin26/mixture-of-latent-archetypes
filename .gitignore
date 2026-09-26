@@ -12,3 +12,6 @@ __pycache__/
 
 # Scratch
 scratchpad/
+
+# Downloaded/cached datasets (e.g. EdNet-KT1, multi-GB -- see src/utils/ednet.py)
+data/

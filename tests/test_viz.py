@@ -30,6 +30,8 @@ from src.simulations.viz import (
     plot_m_sensitivity,
     plot_ofat_sensitivity,
     plot_parameter_recovery,
+    plot_recovery_distribution,
+    plot_recovery_distribution_comparison,
     plot_recovery_scatter,
     plot_setup_diagnostics,
     plot_theta_pi_recovery_distribution,
@@ -82,7 +84,7 @@ def test_recovery_grid_from_arrays_has_one_panel_per_component():
     # each panel draws the assumed and the recovered profile
     assert len(visible[0].get_lines()) >= 2
     ax0 = visible[0]
-    assert ax0.get_xlabel() == "skill index"
+    assert ax0.get_xlabel() == "Skill Index"
     assert ax0.get_ylim()[0] < 0.05 and ax0.get_ylim()[1] > 0.95
 
 
@@ -121,7 +123,7 @@ def test_plot_components_returns_axes_with_a_line_per_component():
     ax = plot_components(MU_TRUE, weights=[0.5, 0.3, 0.2], skill_labels=list("ABCDE"))
     assert isinstance(ax, plt.Axes)
     assert len(ax.get_lines()) == 3
-    assert ax.get_ylabel().startswith("proficiency")
+    assert ax.get_ylabel().startswith("Proficiency")
 
 
 def test_plot_recovery_scatter_returns_axes():
@@ -184,14 +186,14 @@ def test_recovery_distribution_panel_titles_omit_stats():
     results = run_init_repeats(SMALL_VIZ, data_seed=0, n_repeats=4)
     fig = plot_component_recovery_distribution(results)
     ax = [a for a in fig.axes if a.get_visible()][0]
-    assert ax.get_title() == "component 0"
+    assert ax.get_title() == "Component 0"
 
 
 def test_recovery_distribution_xlabel_is_figure_level_not_per_panel():
     results = run_init_repeats(SMALL_VIZ, data_seed=0, n_repeats=4)
     fig = plot_component_recovery_distribution(results)
     visible = [a for a in fig.axes if a.get_visible()]
-    assert fig.get_supxlabel() == "skill index"
+    assert fig.get_supxlabel() == "Skill Index"
     assert all(ax.get_xlabel() == "" for ax in visible)
 
 
@@ -207,7 +209,7 @@ def test_recovery_distribution_groups_overlays_in_shared_panels():
     visible = [a for a in fig.axes if a.get_visible()]
     assert len(visible) == SMALL_VIZ.n_archetypes
     legend_labels = {t.get_text() for t in visible[0].get_legend().get_texts()}
-    assert legend_labels == {"Random", "K-means", "assumed"}
+    assert legend_labels == {"Random", "K-means", "Assumed"}
     # 3 thin lines + 1 median per group (2 groups) + 1 assumed line
     assert len(visible[0].get_lines()) == (3 + 1) * 2 + 1
 
@@ -242,12 +244,205 @@ def test_theta_pi_recovery_distribution_plots_difficulty_by_default():
     random_results = run_init_repeats(replace(SMALL_VIZ, initialization="random"), data_seed=0, n_repeats=2)
     fig = plot_theta_pi_recovery_distribution(groups={"Random": random_results})
     theta_ax = fig.axes[0]
-    assert "difficulty" in theta_ax.get_xlabel()
+    assert "Difficulty" in theta_ax.get_xlabel()
     offsets = np.asarray(theta_ax.collections[0].get_offsets())
     n_items = random_results[0].data.theta.shape[0]
     expected_x = np.concatenate([1.0 - r.data.theta.ravel() for r in random_results])
     assert len(offsets) == n_items * len(random_results)
     np.testing.assert_allclose(sorted(offsets[:, 0]), sorted(expected_x))
+
+
+# --------------------------------------------------------------------------- #
+# plot_recovery_distribution (combined component + theta/pi panels)
+# --------------------------------------------------------------------------- #
+def _init_scheme_groups(n_repeats=3):
+    from dataclasses import replace
+    return {
+        "Random": run_init_repeats(replace(SMALL_VIZ, initialization="random"), data_seed=0, n_repeats=n_repeats),
+        "K-means": run_init_repeats(replace(SMALL_VIZ, initialization="k-means"), data_seed=0, n_repeats=n_repeats),
+    }
+
+
+def test_recovery_distribution_combined_has_component_panels_plus_theta_pi():
+    groups = _init_scheme_groups()
+    fig = plot_recovery_distribution(groups=groups, group_colors={"Random": "#d62728", "K-means": "#1f77b4"})
+    visible = [a for a in fig.axes if a.get_visible()]
+    # n_archetypes component panels + 1 theta panel + 1 pi panel
+    assert len(visible) == SMALL_VIZ.n_archetypes + 2
+
+    component_titles = {a.get_title() for a in visible if a.get_title().startswith("Component")}
+    assert component_titles == {f"Component {i}" for i in range(SMALL_VIZ.n_archetypes)}
+
+    theta_ax, pi_ax = visible[-2], visible[-1]
+    assert "Difficulty" in theta_ax.get_xlabel()
+    assert "Mixture Weight" in pi_ax.get_xlabel()
+
+
+def test_recovery_distribution_combined_grid_is_always_three_columns():
+    # SMALL_VIZ.n_archetypes == 2 -> 1 component row, but column 2 always
+    # needs 2 rows (difficulty, mixture weight) -> 2 rows regardless
+    groups = _init_scheme_groups()
+    fig = plot_recovery_distribution(groups=groups)
+    assert fig.axes[0].get_gridspec().nrows == 2
+    assert fig.axes[0].get_gridspec().ncols == 3
+
+
+def test_recovery_distribution_combined_grid_scales_rows_with_more_components():
+    from dataclasses import replace
+    four_archetype_condition = replace(SMALL_VIZ, n_archetypes=4)
+    groups = {
+        "Random": run_init_repeats(replace(four_archetype_condition, initialization="random"), data_seed=0, n_repeats=2),
+        "K-means": run_init_repeats(replace(four_archetype_condition, initialization="k-means"), data_seed=0, n_repeats=2),
+    }
+    # 4 components -> 2 component rows (2x2 block), still 3 columns (2 for
+    # components + 1 narrower one for the stacked difficulty/mixture panels)
+    fig = plot_recovery_distribution(groups=groups)
+    assert fig.axes[0].get_gridspec().nrows == 2
+    assert fig.axes[0].get_gridspec().ncols == 3
+
+
+def test_recovery_distribution_combined_ylabel_text_appears_once_not_per_row():
+    # With a 2-row component block, every column-0 panel (one per row) used
+    # to each get their own copy of the (long, rotated) y-axis label text,
+    # which collided across rows when rendered -- fixed by giving the whole
+    # figure one shared `fig.supylabel` instead of any individual panel's
+    # own ylabel (component panels all pass ylabel=False now).
+    from dataclasses import replace
+    four_archetype_condition = replace(SMALL_VIZ, n_archetypes=4)
+    groups = {
+        "Random": run_init_repeats(replace(four_archetype_condition, initialization="random"), data_seed=0, n_repeats=2),
+        "K-means": run_init_repeats(replace(four_archetype_condition, initialization="k-means"), data_seed=0, n_repeats=2),
+    }
+    fig = plot_recovery_distribution(groups=groups)
+    component_axes = [a for a in fig.axes if a.get_title().startswith("Component")]
+    non_empty_ylabels = [ax.get_ylabel() for ax in component_axes if ax.get_ylabel()]
+    assert len(non_empty_ylabels) == 0
+    assert fig._supylabel is not None and fig._supylabel.get_text()
+
+
+def test_recovery_distribution_combined_shares_legend_and_group_names():
+    groups = _init_scheme_groups()
+    fig = plot_recovery_distribution(groups=groups)
+    # one shared legend for the whole figure (drawn below it), not a
+    # per-panel one -- no individual Axes carries its own legend.
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    legend_labels = {t.get_text() for t in fig.legends[0].get_texts()}
+    assert legend_labels == {"Random", "K-means", "Assumed"}
+
+
+def test_recovery_distribution_combined_rejects_mismatched_true_mu():
+    from dataclasses import replace
+    group_a = run_init_repeats(SMALL_VIZ, data_seed=0, n_repeats=2)
+    group_b = run_init_repeats(SMALL_VIZ, data_seed=1, n_repeats=2)  # different dataset -> different true mu
+    with pytest.raises(ValueError, match="does not share the same true mu"):
+        plot_recovery_distribution(groups={"A": group_a, "B": group_b})
+
+
+def test_recovery_distribution_combined_saves_to_file(tmp_path):
+    groups = _init_scheme_groups(n_repeats=2)
+    save_path = tmp_path / "combined.pdf"
+    plot_recovery_distribution(groups=groups, save=str(save_path))
+    assert save_path.exists()
+
+
+def test_recovery_distribution_combined_legend_is_one_horizontal_row_below_figure():
+    groups = _init_scheme_groups()
+    fig = plot_recovery_distribution(groups=groups)
+    legend = fig.legends[0]
+    # horizontal: as many columns as entries, not stacked in one column
+    assert legend._ncols == len(legend.get_texts())
+    # below the axes area, not overlapping it
+    assert legend.get_bbox_to_anchor().transformed(fig.transFigure.inverted()).y1 <= 0.05
+
+
+def test_recovery_distribution_combined_shares_ticks_within_component_row():
+    groups = _init_scheme_groups()  # SMALL_VIZ.n_archetypes == 2 -> both components fit in one row
+    fig = plot_recovery_distribution(groups=groups)
+    visible = [a for a in fig.axes if a.get_visible()]
+    component_axes = visible[:2]  # n_archetypes == 2, then theta_ax, pi_ax
+    # leftmost component panel keeps its tick labels
+    assert any(t.get_visible() for t in component_axes[0].get_yticklabels())
+    # second (non-leftmost) component panel shares the first's y-axis and hides its own labels
+    assert component_axes[0].get_shared_y_axes().joined(component_axes[0], component_axes[1])
+    assert all(not t.get_visible() for t in component_axes[1].get_yticklabels())
+
+
+# --------------------------------------------------------------------------- #
+# plot_recovery_distribution_comparison (two experiments, side by side)
+# --------------------------------------------------------------------------- #
+def _comparison_groups(n_repeats=2):
+    from dataclasses import replace
+    four_archetype_condition = replace(SMALL_VIZ, n_archetypes=4)
+    left = {
+        "Random": run_init_repeats(replace(four_archetype_condition, initialization="random"), data_seed=0, n_repeats=n_repeats),
+        "K-means": run_init_repeats(replace(four_archetype_condition, initialization="k-means"), data_seed=0, n_repeats=n_repeats),
+        "Informed": run_init_repeats(replace(four_archetype_condition, initialization="informed"), data_seed=0, n_repeats=n_repeats),
+    }
+    # a different data_seed -> a genuinely different true mu, on purpose:
+    # the two sides are independent experiments, not required to match.
+    right = {
+        "K-means": run_init_repeats(replace(four_archetype_condition, initialization="k-means"), data_seed=1, n_repeats=n_repeats),
+        "Informed": run_init_repeats(replace(four_archetype_condition, initialization="informed"), data_seed=1, n_repeats=n_repeats),
+    }
+    return left, right
+
+
+def test_recovery_distribution_comparison_has_one_row_per_component_plus_two():
+    left, right = _comparison_groups()
+    fig = plot_recovery_distribution_comparison(
+        left_groups=left, right_groups=right, left_title="Left", right_title="Right",
+    )
+    # 4 components + difficulty + mixture-weight = 6 rows, 2 columns each = 12 axes
+    assert len(fig.axes) == 12
+
+
+def test_recovery_distribution_comparison_sides_are_independent_datasets():
+    left, right = _comparison_groups()
+    fig = plot_recovery_distribution_comparison(
+        left_groups=left, right_groups=right, left_title="Left", right_title="Right",
+    )
+    left_legend, right_legend = fig.legends
+    assert {t.get_text() for t in left_legend.get_texts()} == {"Random", "K-means", "Informed", "Assumed"}
+    assert {t.get_text() for t in right_legend.get_texts()} == {"K-means", "Informed", "Assumed"}
+
+
+def test_recovery_distribution_comparison_row_labels_appear_once():
+    left, right = _comparison_groups()
+    fig = plot_recovery_distribution_comparison(
+        left_groups=left, right_groups=right, left_title="Left", right_title="Right",
+    )
+    row_label_texts = {t.get_text() for t in fig.texts}
+    for expected in ["Component 0", "Component 1", "Component 2", "Component 3", "Item Difficulty", "Mixture Weight"]:
+        assert sum(t.get_text() == expected for t in fig.texts) == 1, expected
+        assert expected in row_label_texts
+
+
+def test_recovery_distribution_comparison_draws_a_divider_line():
+    left, right = _comparison_groups()
+    fig = plot_recovery_distribution_comparison(
+        left_groups=left, right_groups=right, left_title="Left", right_title="Right",
+    )
+    from matplotlib.lines import Line2D
+    divider_candidates = [a for a in fig.artists if isinstance(a, Line2D)]
+    assert len(divider_candidates) >= 1
+
+
+def test_recovery_distribution_comparison_rejects_mismatched_component_counts():
+    left, _ = _comparison_groups()
+    small_right = {"K-means": run_init_repeats(SMALL_VIZ, data_seed=1, n_repeats=2)}  # n_archetypes == 2, not 4
+    with pytest.raises(ValueError, match="same count"):
+        plot_recovery_distribution_comparison(
+            left_groups=left, right_groups=small_right, left_title="Left", right_title="Right",
+        )
+
+
+def test_recovery_distribution_comparison_saves_to_file(tmp_path):
+    left, right = _comparison_groups()
+    save_path = tmp_path / "comparison.pdf"
+    plot_recovery_distribution_comparison(
+        left_groups=left, right_groups=right, left_title="Left", right_title="Right", save=str(save_path),
+    )
+    assert save_path.exists()
 
 
 # --------------------------------------------------------------------------- #

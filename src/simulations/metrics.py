@@ -115,3 +115,50 @@ def masked_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     if np.unique(y_true).size < 2:
         return float("nan")
     return float(roc_auc_score(y_true, y_prob))
+
+
+def paired_bootstrap_diff(
+    a: np.ndarray, b: np.ndarray, n_boot: int = 10_000, seed: int = 0, ci: float = 0.95
+) -> dict:
+    """Paired bootstrap CI for `mean(a) - mean(b)` over matched samples.
+
+    `a`/`b` must be the same metric for the same units under two
+    conditions -- e.g. the same evaluation learners' `mola_auc` and
+    `neural_cdm_auc` -- not two independent samples. Resamples *indices*
+    with replacement (jointly, so each resample keeps `a[i]`/`b[i]`
+    paired) `n_boot` times, computing `mean(a) - mean(b)` on each
+    resample, then reports the percentile CI of that distribution.
+
+    Rows where either `a` or `b` is NaN (e.g. an evaluation learner whose
+    held-out responses are all one class, so `masked_auc` is undefined)
+    are dropped before resampling, since they can't be paired.
+
+    A CI that excludes zero supports a claim that the two conditions
+    differ significantly. A CI that includes zero supports only "no
+    significant difference detected at this sample size" -- NOT a claim
+    that the two conditions are equivalent (failing to reject a null of
+    no difference is not evidence the true difference is zero; a genuine
+    equivalence claim needs a pre-specified equivalence margin and a
+    dedicated test such as TOST, which this does not attempt).
+
+    Returns `{"n", "point_diff", "ci_lo", "ci_hi", "excludes_zero"}`.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    valid = ~(np.isnan(a) | np.isnan(b))
+    a, b = a[valid], b[valid]
+    n = a.size
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    diffs = a[idx].mean(axis=1) - b[idx].mean(axis=1)
+
+    alpha = 1.0 - ci
+    lo, hi = np.percentile(diffs, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return {
+        "n": int(n),
+        "point_diff": float(a.mean() - b.mean()),
+        "ci_lo": float(lo),
+        "ci_hi": float(hi),
+        "excludes_zero": bool(lo > 0 or hi < 0),
+    }

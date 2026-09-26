@@ -22,7 +22,7 @@ from src.simulations.factors import (
     ofat_design,
     replicate_seeds,
 )
-from src.simulations.metrics import pi_rmse, repeat_alignment_spread
+from src.simulations.metrics import paired_bootstrap_diff, pi_rmse, repeat_alignment_spread
 from src.simulations.run import (
     default_m_grid,
     fit_mola,
@@ -222,6 +222,42 @@ def test_pi_rmse_matches_rmse_formula_and_differs_from_mae():
     expected_mae = np.mean(np.abs(pi_true - pi_est))
     assert np.isclose(pi_rmse(pi_true, pi_est, perm), expected_rmse)
     assert not np.isclose(expected_rmse, expected_mae)  # sanity: not accidentally equal here
+
+
+def test_paired_bootstrap_diff_excludes_zero_for_a_clear_difference():
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.8, 0.05, size=200)
+    b = a - 0.5 + rng.normal(0.0, 0.01, size=200)  # clearly different, still paired to a
+
+    result = paired_bootstrap_diff(a, b, n_boot=2000, seed=0)
+
+    assert result["n"] == 200
+    assert np.isclose(result["point_diff"], np.mean(a) - np.mean(b), atol=1e-9)
+    assert result["excludes_zero"] is True
+    assert result["ci_lo"] > 0  # a > b throughout, so the CI should sit above zero
+
+
+def test_paired_bootstrap_diff_includes_zero_when_there_is_no_difference():
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.5, 0.2, size=200)
+    b = a.copy()  # identical -- the true difference is exactly zero
+
+    result = paired_bootstrap_diff(a, b, n_boot=2000, seed=0)
+
+    assert result["point_diff"] == 0.0
+    assert result["excludes_zero"] is False
+
+
+def test_paired_bootstrap_diff_drops_nan_rows_pairwise():
+    a = np.array([1.0, 2.0, np.nan, 4.0, 5.0])
+    b = np.array([1.0, 2.0, 3.0, np.nan, 5.0])
+
+    result = paired_bootstrap_diff(a, b, n_boot=100, seed=0)
+
+    # rows 2 and 3 (0-indexed) each have a NaN in one array -- both dropped,
+    # leaving only the 3 fully-paired rows.
+    assert result["n"] == 3
+    assert result["point_diff"] == 0.0
 
 
 # --------------------------------------------------------------------------- #
