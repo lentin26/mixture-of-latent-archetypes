@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import numpy as np
+from scipy import stats
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import adjusted_rand_score, roc_auc_score
 
@@ -141,7 +142,13 @@ def paired_bootstrap_diff(
     equivalence claim needs a pre-specified equivalence margin and a
     dedicated test such as TOST, which this does not attempt).
 
-    Returns `{"n", "point_diff", "ci_lo", "ci_hi", "excludes_zero"}`.
+    Returns `{"n", "point_diff", "ci_lo", "ci_hi", "excludes_zero",
+    "p_value"}`. `p_value` is the two-sided bootstrap p-value
+    `2 * min(P(diff <= 0), P(diff >= 0))` (estimated from the same
+    resampled distribution, capped at 1.0) -- the CI-based `excludes_zero`
+    and this `p_value` agree by construction (`p_value <= 1 - ci` iff the
+    CI excludes zero), but a p-value is what a multiple-comparisons
+    correction such as Holm-Bonferroni (see `holm_bonferroni`) needs.
     """
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
@@ -155,10 +162,113 @@ def paired_bootstrap_diff(
 
     alpha = 1.0 - ci
     lo, hi = np.percentile(diffs, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    p_value = min(1.0, 2 * min(np.mean(diffs <= 0), np.mean(diffs >= 0)))
     return {
         "n": int(n),
         "point_diff": float(a.mean() - b.mean()),
         "ci_lo": float(lo),
         "ci_hi": float(hi),
         "excludes_zero": bool(lo > 0 or hi < 0),
+        "p_value": float(p_value),
+    }
+
+
+def holm_bonferroni(p_values: Sequence[float], alpha: float = 0.05) -> list[bool]:
+    """Holm's step-down multiple-comparisons correction.
+
+    Controls the family-wise error rate (probability of *any* false
+    positive across the whole family of tests) with less power loss than
+    a plain Bonferroni correction, which uses the same `alpha / m`
+    threshold for every test regardless of how small its p-value is.
+
+    Sorts `p_values` ascending; the `i`-th smallest (1-indexed) is
+    rejected only if it's `<= alpha / (m - i + 1)` *and* every smaller
+    p-value was also rejected -- the step-down stops at the first
+    non-rejection, so a large p-value earlier in the sorted order can
+    prevent a later, larger p-value from being called significant even
+    if it would pass its own threshold in isolation.
+
+    Returns significance flags in the *original* input order (not sorted
+    order), so callers can zip the result directly with their own
+    comparison labels.
+    """
+    p_values = np.asarray(p_values, dtype=float)
+    m = p_values.size
+    order = np.argsort(p_values)
+    sorted_p = p_values[order]
+
+    significant_sorted = np.zeros(m, dtype=bool)
+    for i, p in enumerate(sorted_p):
+        threshold = alpha / (m - i)
+        if p <= threshold:
+            significant_sorted[i] = True
+        else:
+            break  # step-down: stop at the first non-rejection
+
+    significant = np.zeros(m, dtype=bool)
+    significant[order] = significant_sorted
+    return significant.tolist()
+
+
+def nadeau_bengio_test(
+    a: np.ndarray, b: np.ndarray, n_train: int, n_test: int, ci: float = 0.95
+) -> dict:
+    """Corrected paired t-test for repeated random train/test resampling
+    (Nadeau & Bengio, 2003) -- e.g. sklearn's `ShuffleSplit` run many
+    times over the same underlying dataset, as opposed to genuinely
+    independent evaluation units.
+
+    `a`/`b` must be the same metric for the same model comparison across
+    `n` such repeated splits. Unlike `paired_bootstrap_diff`, that `n` is
+    *not* a count of independent observations here: every split's
+    training set overlaps heavily with every other split's (and, for
+    `ShuffleSplit` specifically, test sets overlap across splits too,
+    since the same individual can land in many splits' test sets), so
+    the resulting per-split metric values are correlated. Both a plain
+    paired t-test and a plain paired bootstrap (`paired_bootstrap_diff`)
+    treat the `n` splits as independent and so *underestimate* the
+    variance of the mean difference, inflating the false-positive rate --
+    confirmed directly on this codebase's low-dim experiment, where
+    several comparisons that were "significant" under
+    `paired_bootstrap_diff` were not once corrected.
+
+    This replaces the naive variance-of-the-mean term `1/n` with
+    `1/n + n_test/n_train`, which accounts for the overlap-induced
+    correlation and is always larger than the naive term (equal only in
+    the degenerate case `n_test = 0`). The test statistic is then
+    `mean(diff) / sqrt(corrected_var)`, referred to a `t` distribution
+    with `n - 1` degrees of freedom, exactly as an ordinary paired
+    t-test would use `mean(diff) / sqrt(sample_var / n)`.
+
+    Returns the same shape as `paired_bootstrap_diff`:
+    `{"n", "point_diff", "ci_lo", "ci_hi", "excludes_zero", "p_value"}`,
+    so it's a drop-in replacement wherever that function's output feeds
+    `holm_bonferroni` or a results table.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    valid = ~(np.isnan(a) | np.isnan(b))
+    d = (a - b)[valid]
+    n = d.size
+
+    mean_d = float(d.mean())
+    sample_var = float(d.var(ddof=1))
+    corrected_var = (1.0 / n + n_test / n_train) * sample_var
+    se = float(np.sqrt(corrected_var))
+    df = n - 1
+
+    t_stat = mean_d / se if se > 0 else 0.0
+    p_value = float(2 * (1 - stats.t.cdf(abs(t_stat), df=df)))
+
+    alpha = 1.0 - ci
+    margin = float(stats.t.ppf(1 - alpha / 2, df=df) * se)
+    ci_lo, ci_hi = mean_d - margin, mean_d + margin
+
+    return {
+        "n": int(n),
+        "point_diff": mean_d,
+        "ci_lo": ci_lo,
+        "ci_hi": ci_hi,
+        "excludes_zero": bool(ci_lo > 0 or ci_hi < 0),
+        "p_value": p_value,
     }

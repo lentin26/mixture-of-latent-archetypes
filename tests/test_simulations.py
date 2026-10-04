@@ -22,7 +22,13 @@ from src.simulations.factors import (
     ofat_design,
     replicate_seeds,
 )
-from src.simulations.metrics import paired_bootstrap_diff, pi_rmse, repeat_alignment_spread
+from src.simulations.metrics import (
+    holm_bonferroni,
+    nadeau_bengio_test,
+    paired_bootstrap_diff,
+    pi_rmse,
+    repeat_alignment_spread,
+)
 from src.simulations.run import (
     default_m_grid,
     fit_mola,
@@ -258,6 +264,94 @@ def test_paired_bootstrap_diff_drops_nan_rows_pairwise():
     # leaving only the 3 fully-paired rows.
     assert result["n"] == 3
     assert result["point_diff"] == 0.0
+
+
+def test_paired_bootstrap_diff_p_value_is_small_for_a_clear_difference():
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.8, 0.05, size=200)
+    b = a - 0.5 + rng.normal(0.0, 0.01, size=200)
+
+    result = paired_bootstrap_diff(a, b, n_boot=2000, seed=0)
+
+    assert result["p_value"] < 0.01
+    assert result["excludes_zero"] is True
+
+
+def test_paired_bootstrap_diff_p_value_is_large_when_there_is_no_difference():
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.5, 0.2, size=200)
+    b = a.copy()
+
+    result = paired_bootstrap_diff(a, b, n_boot=2000, seed=0)
+
+    assert result["p_value"] == 1.0
+    assert result["excludes_zero"] is False
+
+
+def test_holm_bonferroni_matches_hand_worked_example():
+    # sorted p-values 0.01, 0.03, 0.04 against thresholds
+    # 0.05/3=0.0167, 0.05/2=0.025, 0.05/1=0.05: 0.01 passes, 0.03 fails its
+    # own (looser) threshold and the step-down stops there, so only the
+    # smallest p-value's hypothesis is rejected even though 0.04 <= 0.05.
+    assert holm_bonferroni([0.03, 0.01, 0.04], alpha=0.05) == [False, True, False]
+
+
+def test_holm_bonferroni_all_significant():
+    assert holm_bonferroni([0.001, 0.002, 0.003], alpha=0.05) == [True, True, True]
+
+
+def test_holm_bonferroni_none_significant():
+    assert holm_bonferroni([0.5, 0.6, 0.7], alpha=0.05) == [False, False, False]
+
+
+def test_nadeau_bengio_matches_hand_computation():
+    a = np.array([0.6, 0.62, 0.58, 0.65, 0.61])
+    b = np.array([0.5, 0.52, 0.48, 0.55, 0.51])
+    d = a - b
+    n = d.size
+    mean_d = d.mean()
+    sample_var = d.var(ddof=1)
+    n_train, n_test = 80, 20
+    expected_se = np.sqrt((1 / n + n_test / n_train) * sample_var)
+
+    result = nadeau_bengio_test(a, b, n_train=n_train, n_test=n_test)
+
+    assert result["n"] == n
+    assert np.isclose(result["point_diff"], mean_d)
+    # reconstruct the SE from the reported CI half-width and t critical value
+    from scipy import stats
+    margin = (result["ci_hi"] - result["ci_lo"]) / 2
+    implied_se = margin / stats.t.ppf(0.975, df=n - 1)
+    assert np.isclose(implied_se, expected_se)
+
+
+def test_nadeau_bengio_reduces_to_plain_paired_t_test_when_n_test_is_zero():
+    from scipy import stats
+
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.8, 0.1, size=30)
+    b = rng.normal(0.7, 0.1, size=30)
+
+    result = nadeau_bengio_test(a, b, n_train=100, n_test=0)
+    t_stat, p_value = stats.ttest_rel(a, b)
+
+    assert np.isclose(result["p_value"], p_value)
+
+
+def test_nadeau_bengio_is_more_conservative_than_naive_paired_bootstrap():
+    # Same overlap-correlated-looking data: the corrected test's CI should
+    # be wider (harder to call significant) than a naive paired bootstrap
+    # that treats the n splits as independent.
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.65, 0.05, size=50)
+    b = a - 0.02 + rng.normal(0.0, 0.01, size=50)
+
+    boot = paired_bootstrap_diff(a, b, n_boot=5000, seed=0)
+    nb = nadeau_bengio_test(a, b, n_train=80, n_test=20)
+
+    boot_width = boot["ci_hi"] - boot["ci_lo"]
+    nb_width = nb["ci_hi"] - nb["ci_lo"]
+    assert nb_width > boot_width
 
 
 # --------------------------------------------------------------------------- #
