@@ -1045,8 +1045,8 @@ def _plot_ofat_panel(
     else:
         x = np.arange(len(levels))
 
-    ax.errorbar(x, stats["mean"], yerr=stats["std"], marker="o",
-                capsize=3, color="#1f77b4")
+    ax.errorbar(x, stats["mean"], yerr=stats["std"], marker="o", markersize=5,
+                capsize=4, linewidth=2.2, color="#1f77b4")
     if reference_line == "linear" and numeric:
         x0, y0 = x[0], stats["mean"].iloc[0]
         if x0 > 0 and np.isfinite(y0) and y0 > 0:
@@ -1055,7 +1055,7 @@ def _plot_ofat_panel(
             # reads as a straight line under log_x=log_y=True (the
             # slope-1 signature of linear cost) and equally correctly
             # under linear-linear axes.
-            ax.plot(x, y0 * (x / x0), color="0.3", linewidth=1.2,
+            ax.plot(x, y0 * (x / x0), color="0.3", linewidth=1.8,
                      linestyle="--", label="linear reference")
     if log_x and numeric:
         ax.set_xscale("log")
@@ -1073,16 +1073,16 @@ def _plot_ofat_panel(
         ax.set_xticks(x)
     else:
         ax.set_xticks(np.arange(len(levels)))
-    ax.set_xticklabels([str(lv) for lv in levels], rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels([str(lv) for lv in levels], rotation=30, ha="right", fontsize=9)
     if show_title:
-        ax.set_title(humanize_label(factor, label_map), fontsize=9)
+        ax.set_title(humanize_label(factor, label_map), fontsize=10)
     ax.grid(alpha=0.3, linewidth=0.6)
     if show_ylabel:
-        ax.set_ylabel(humanize_label(metric, label_map))
+        ax.set_ylabel(humanize_label(metric, label_map), fontsize=10)
     # guard: a non-numeric factor's panel never gets a reference line, so
     # only add a legend where there's actually a labeled artist to show.
     if show_legend and ax.get_legend_handles_labels()[0]:
-        ax.legend(fontsize=7, loc="upper left")
+        ax.legend(fontsize=8, loc="upper left")
 
 
 def plot_ofat_sensitivity(
@@ -1197,6 +1197,12 @@ def plot_ofat_sensitivity(
         squeeze=False, sharey=plt_sharey,
     )
 
+    # No figure-level title is set here -- for a publication figure, the
+    # title belongs in the paper's own \caption, not baked into the saved
+    # image. Print `plot_ofat_sensitivity`'s implied title from the calling
+    # cell instead, e.g. ``print("OFAT Sensitivity: " + " / ".join(...))``,
+    # so it's visible for reference in the notebook without ending up in
+    # the exported figure.
     if multi_metric:
         for row, m in enumerate(metrics):
             for col, factor in enumerate(factors):
@@ -1205,10 +1211,6 @@ def plot_ofat_sensitivity(
                     log_x, log_y_per_row[row], reference_line_per_row[row], label_map,
                     show_title=(row == 0), show_ylabel=(col == 0), show_legend=(col == 0),
                 )
-        fig.suptitle(
-            "OFAT Sensitivity: " + " / ".join(humanize_label(m, label_map) for m in metrics),
-            fontsize=12,
-        )
     else:
         flat = axes.ravel()
         for idx, factor in enumerate(factors):
@@ -1219,7 +1221,6 @@ def plot_ofat_sensitivity(
             )
         for j in range(len(factors), len(flat)):
             flat[j].set_visible(False)
-        # fig.suptitle(f"OFAT Sensitivity: {humanize_label(metrics[0], label_map)}", fontsize=12)
 
     fig.tight_layout()
     if save is not None:

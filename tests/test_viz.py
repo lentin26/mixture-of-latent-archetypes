@@ -636,9 +636,26 @@ def test_ofat_sensitivity_uses_nice_labels_by_default():
     ax = [a for a in fig.axes if a.get_visible()][0]
     assert ax.get_title() == METRIC_LABELS["n_learners"]
     assert ax.get_ylabel() == METRIC_LABELS["mu_rmse"]
-    assert METRIC_LABELS["mu_rmse"] in fig._suptitle.get_text()
     # a raw snake_case name should never leak into the figure
     assert "n_learners" not in ax.get_title()
+
+
+def test_ofat_sensitivity_has_no_figure_level_title():
+    # Publication figures carry their title in the paper's own \caption, not
+    # baked into the saved image -- plot_ofat_sensitivity should never set a
+    # suptitle, for a single metric or several.
+    conditions = ofat_design(baseline=SMALL_VIZ, factors=["n_learners"])
+    results = run_design(conditions, n_replications=2, base_seed=0)
+
+    single = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="mu_rmse", baseline=SMALL_VIZ,
+    )
+    assert single._suptitle is None
+
+    multi = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric=["mu_rmse", "theta_rmse"], baseline=SMALL_VIZ,
+    )
+    assert multi._suptitle is None
 
 
 def test_ofat_sensitivity_labels_override_the_default():
