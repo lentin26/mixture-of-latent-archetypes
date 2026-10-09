@@ -501,27 +501,53 @@ class _MoLABase:
         # X1 and X2 are item response and inverse item response datum
         self._init_fit(X)
         X1, X2, X_mask = self.create_X1_X2_X_mask(X, A)
-        self.log_likelihood = self.get_log_likelihood(X1, X2)
-        
-        # iterate until stopping criteria is met 
+
+        # X1 @ Q, X2 @ Q, X_mask @ Q, and X1 + X2 depend only on the (fixed,
+        # sparse) data and Q-matrix, never on mu/theta/pi -- so unlike
+        # everything else in the EM loop, they're the same on every
+        # iteration. Computed once here and threaded through e_step/m_step
+        # below, this turns what was a sparse-sparse multiply (SciPy's most
+        # expensive path: it has to re-derive the product's nonzero pattern,
+        # `csr_matmat_maxnnz`, before the multiply itself, `csr_matmat`, on
+        # every single call) into a single multiply reused `max_iter` times.
+        # Every other caller of get_log_likelihood/e_step/m_step/
+        # compute_sufficient_stats (inference, holdout scoring, the batch/
+        # partial_fit paths) doesn't pass these and recomputes exactly as
+        # before -- this is additive, not a behavior change for them.
+        X1Q = X1 @ self.Q
+        X2Q = X2 @ self.Q
+        X_maskQ = X_mask @ self.Q
+        obs_mask = X1 + X2
+
+        self.log_likelihood = self.get_log_likelihood(X1, X2, X1Q=X1Q, X2Q=X2Q, obs_mask=obs_mask)
+
+        # iterate until stopping criteria is met
         while not self.stop:
-            self.e_step(X1, X2)
-            self.m_step(X1, X_mask, A)
-            
+            self.e_step(X1, X2, X1Q=X1Q, X2Q=X2Q, obs_mask=obs_mask)
+            self.m_step(X1, X_mask, A, X1Q=X1Q, X_maskQ=X_maskQ)
+
             self.check_for_stability()
             self.check_stopping_criteria()
-            
+
             nll = self.get_nll()
             self.nll_trace.append(nll)
 
-    def get_log_likelihood(self, X1, X2):
+    def get_log_likelihood(self, X1, X2, X1Q=None, X2Q=None, obs_mask=None):
         """
         Compute the current likelihood.
 
         A: attempt number matrix
+
+        X1Q, X2Q : optional precomputed ``X1 @ self.Q`` / ``X2 @ self.Q``
+            (see `fit`'s caching comment -- these depend only on the data
+            and ``self.Q``, so a repeated caller within one `fit` loop can
+            pass them in instead of paying for the sparse-sparse multiply
+            again). ``None`` (the default) recomputes them here exactly as
+            before, so any other caller's behavior is unchanged.
+        obs_mask : optional precomputed ``X1 + X2``, same rationale.
         """
         # Use aggregate "ab" artifacts during inference
-        if (self.a is not None) | (self.b is not None):     
+        if (self.a is not None) | (self.b is not None):
             # compute likelihood terms
             L1 = X1 @ self.a
             L2 = X2 @ self.b
@@ -534,13 +560,15 @@ class _MoLABase:
             # a and b are shape (J, M), large during training when J is large
             # we can avoid the large intermediary by changing the order of operations
             # We assume that J > K.
-            tmp1 = X1 @ self.Q  # shape (N, K)
+            if X1Q is None:
+                X1Q = X1 @ self.Q  # shape (N, K)
             tmp2 = X1 @ np.log(self.theta).reshape(-1, 1)  # shape (N, 1)
-            L1 = tmp1 @ np.log(self.mu.T) + tmp2  # shape (N, M)
+            L1 = X1Q @ np.log(self.mu.T) + tmp2  # shape (N, M)
 
-            tmp1 = X2 @ self.Q  # shape (N, K)
+            if X2Q is None:
+                X2Q = X2 @ self.Q  # shape (N, K)
             tmp2 = X2 @ np.log(1 - self.theta).reshape(-1, 1)  # shape (N, 1)
-            L2 = tmp1 @ np.log(1 - self.mu.T) + tmp2  # shape (N, M)
+            L2 = X2Q @ np.log(1 - self.mu.T) + tmp2  # shape (N, M)
 
             # P_{jm} - correct/incorrect response probability for all items j
             # and components m
@@ -549,7 +577,7 @@ class _MoLABase:
 
             # Compute the per-feature normalization matrix (J, M)
             # Note: Ensure log_P2 uses log(1-mu) if it represents the "0" case
-            log_P_norm = np.logaddexp(log_P1, log_P2) 
+            log_P_norm = np.logaddexp(log_P1, log_P2)
             # self.log_P = log_P1 - log_P_norm
 
             # Subtract from the data terms
@@ -558,9 +586,10 @@ class _MoLABase:
             if not self.pseudo_likelihood:
                 # log_P_norm is (J, M)
                 # X1 and X2 are (N, J)
-                obs_mask = X1 + X2  # Shape (N, J)
+                if obs_mask is None:
+                    obs_mask = X1 + X2  # Shape (N, J)
 
-                # Use matrix multiplication to sum the normalization 
+                # Use matrix multiplication to sum the normalization
                 # only for observed items per sample
                 # (N, J) @ (J, M) -> (N, M)
                 log_norm_data = obs_mask @ log_P_norm
@@ -572,14 +601,16 @@ class _MoLABase:
         assert (log_likelihood <= 1e-12).all()
         return log_likelihood
 
-    def e_step(self, X1, X2):
+    def e_step(self, X1, X2, X1Q=None, X2Q=None, obs_mask=None):
         """
         Compute the responsibility of each latent variable. Note that
         we compute the updated the log likelihood in the 'check_stopping_criteria'
         call to avoid computing it twice per EM iteration.
+
+        X1Q, X2Q, obs_mask : see `get_log_likelihood`.
         """
         # Update log-likelihood
-        self.log_likelihood = self.get_log_likelihood(X1, X2)
+        self.log_likelihood = self.get_log_likelihood(X1, X2, X1Q=X1Q, X2Q=X2Q, obs_mask=obs_mask)
         # calculate unnormalized log posterior
         unnorm_log_post = self.log_likelihood + np.log(self.pi.T)
 
@@ -592,13 +623,17 @@ class _MoLABase:
         assert (abs(post - 1) <= 0.001).all, \
             f"Posterior does not sum to 1, instead sums to: {post}."
 
-    def m_step(self, X1, X_mask, A):
+    def m_step(self, X1, X_mask, A, X1Q=None, X_maskQ=None):
         """
-        Update model parameters to maximized expectation of the complete 
+        Update model parameters to maximized expectation of the complete
         data log-likelihood wrt to the posterior of the latent variable.
+
+        X1Q, X_maskQ : see `get_log_likelihood`'s docstring -- same
+            precomputed-``@ self.Q`` caching, passed through to
+            `compute_sufficient_stats`.
         """
         # Compute sufficient statistics
-        stats = self.compute_sufficient_stats(X1, X_mask)
+        stats = self.compute_sufficient_stats(X1, X_mask, X1Q=X1Q, X_maskQ=X_maskQ)
         # Update model parameters
         self.update_model_params(*stats)
 
@@ -857,14 +892,23 @@ class _MoLABase:
         # # update aggregate params
         # self.update_ab_params()
 
-    def compute_sufficient_stats(self, X1, X_mask):
+    def compute_sufficient_stats(self, X1, X_mask, X1Q=None, X_maskQ=None):
+        """
+        X1Q, X_maskQ : optional precomputed ``X1 @ self.Q`` / ``X_mask @
+            self.Q`` -- see `get_log_likelihood`'s docstring. ``None`` (the
+            default) recomputes them here exactly as before.
+        """
         # get posterior
         post = np.exp(self.log_post)
         post_t = post.T
 
         # counts for mu
-        I_mk = post_t @ (X1 @ self.Q)
-        R_mk = post_t @ (X_mask @ self.Q)
+        if X1Q is None:
+            X1Q = X1 @ self.Q
+        if X_maskQ is None:
+            X_maskQ = X_mask @ self.Q
+        I_mk = post_t @ X1Q
+        R_mk = post_t @ X_maskQ
 
         # counts for theta (1 - difficulty)
         I_jm = (post_t @ X1).T
