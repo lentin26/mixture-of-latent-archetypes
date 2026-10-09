@@ -1743,3 +1743,92 @@ def plot_setup_diagnostics(
     if save is not None:
         _savefig(fig, save)
     return fig
+
+
+# Fixed colors/markers per method so EM/MM, Adam (any learning rate) and
+# L-BFGS are visually consistent across every call, instead of falling out
+# of Matplotlib's default color cycle (which would reassign colors as soon
+# as the set of learning rates swept changes).
+_EM_VS_GRADIENT_STYLE: dict[str, dict] = {
+    "em_mm": dict(color="black", linestyle="-", linewidth=2.2, zorder=5),
+    "lbfgs": dict(color="#D55E00", linestyle="-", linewidth=1.8, zorder=4),
+}
+_ADAM_COLORS = ["#0072B2", "#56B4E9", "#009E73", "#CC79A7", "#E69F00"]
+
+
+def _em_vs_gradient_style(key: str, adam_idx: list) -> dict:
+    if key in _EM_VS_GRADIENT_STYLE:
+        return _EM_VS_GRADIENT_STYLE[key]
+    color = _ADAM_COLORS[len(adam_idx) % len(_ADAM_COLORS)]
+    adam_idx.append(key)
+    return dict(color=color, linestyle="--", linewidth=1.4, zorder=3)
+
+
+def _em_vs_gradient_label(key: str) -> str:
+    if key == "em_mm":
+        return "EM/MM"
+    if key == "lbfgs":
+        return "L-BFGS"
+    if key.startswith("adam_lr"):
+        return f"Adam (lr={key.removeprefix('adam_lr')})"
+    return key
+
+
+def plot_em_vs_gradient(
+    results: dict,
+    *,
+    mark_violations: bool = True,
+    xscale: str = "log",
+    figsize_key: str | float = "acm-sigconf-column",
+    ax=None,
+    save: str | Path | None = None,
+):
+    """NLL vs. wall-clock time for EM/MM vs. autodiff gradient methods.
+
+    ``results`` is the dict returned by
+    :func:`src.simulations.em_vs_gradient.run` -- one entry per method, each
+    holding at least ``nll_trace`` and ``time_trace`` (equal-length 1-D
+    arrays). Marks, with an "x", every step where NLL *increased* relative
+    to the step before it -- a direct monotonicity violation; EM/MM has none
+    by construction, gradient methods are not guaranteed any.
+
+    ``xscale="log"`` (the default) matters here specifically because these
+    methods' wall-clock budgets routinely span 2+ orders of magnitude (a
+    fast Adam run finishing in ~0.2s while EM/MM is still going at 20s) --
+    on a linear axis nearly everything interesting happens in the first few
+    pixels. The first ``time_trace`` entry of each method is typically 0
+    (or a sub-millisecond first step), which has no finite log; those points
+    are dropped (not plotted) under ``xscale="log"`` rather than raising.
+    """
+    from src.style import figsize as _figsize
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=_figsize(figsize_key) if isinstance(figsize_key, str) else figsize_key)
+    else:
+        fig = ax.figure
+
+    adam_idx: list = []
+    for key, res in results.items():
+        style = _em_vs_gradient_style(key, adam_idx)
+        t = np.asarray(res["time_trace"])
+        nll = np.asarray(res["nll_trace"])
+        if xscale == "log":
+            keep = t > 0
+            t, nll = t[keep], nll[keep]
+        ax.plot(t, nll, label=_em_vs_gradient_label(key), **style)
+        if mark_violations and len(nll) > 1:
+            worse = np.flatnonzero(np.diff(nll) > 1e-6) + 1
+            if worse.size:
+                ax.plot(t[worse], nll[worse], "x", color=style["color"], markersize=6, zorder=6)
+
+    ax.set_xscale(xscale)
+    ax.set_xlabel("wall-clock time (s)")
+    ax.set_ylabel("negative log-likelihood")
+    ax.legend(fontsize=7, loc="upper right")
+
+    if standalone:
+        fig.tight_layout()
+        if save is not None:
+            _savefig(fig, save)
+    return fig
