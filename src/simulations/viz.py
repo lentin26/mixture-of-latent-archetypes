@@ -35,14 +35,14 @@ from src.simulations.factors import (
     SEPARATION_LEVELS,
     SimulationCondition,
 )
-from src.simulations.metrics import align_components
+from src.simulations.metrics import align_components, within_between_variance
 from src.simulations.run import SimulationResult
 from src.style import humanize_label
 
 ASSUMED_KW = dict(color="black", marker="o", markersize=4, linewidth=1.8, label="Assumed")
 RECOVERED_KW = dict(
-    color="#d62728", marker="x", markersize=5, linewidth=1.8, linestyle="--",
-    label="recovered",
+    color="#0072B2", marker="x", markersize=5, linewidth=1.8, linestyle="--",
+    label="Recovered",
 )
 
 # Human-readable labels for simulation metrics and SimulationCondition
@@ -165,7 +165,7 @@ def _style_profile_axes(ax, x, skill_labels, *, ylabel=True, xlabel=True):
     if xlabel:
         ax.set_xlabel("Skill Index")
     if ylabel:
-        ax.set_ylabel("Proficiency, P(skill mastered)")
+        ax.set_ylabel("Proficiency")
     ax.grid(alpha=0.3, linewidth=0.6)
     if skill_labels is not None:
         ax.set_xticks(x)
@@ -211,8 +211,6 @@ def plot_component_recovery(
     *,
     mu_true=None,
     mu_est=None,
-    pi_true=None,
-    pi_est=None,
     skill_labels: Sequence | None = None,
     layout: str = "grid",
     max_cols: int = 4,
@@ -222,21 +220,19 @@ def plot_component_recovery(
     """Overlay assumed and recovered proficiency profiles, component by component.
 
     Pass a :class:`SimulationResult` (from ``run_condition(..., return_fit=True)``)
-    or the arrays directly via ``mu_true`` / ``mu_est`` (each ``(M, K)``);
-    ``pi_true`` / ``pi_est`` are optional mixture weights shown in the titles.
+    or the arrays directly via ``mu_true`` / ``mu_est`` (each ``(M, K)``).
+    Mixture-weight recovery has its own panel in :func:`plot_parameter_recovery`.
 
     ``layout="grid"`` draws one panel per matched component; ``layout="overlay"``
     draws all components on a single axes (assumed solid, recovered dashed, one
     color per component). Returns the :class:`matplotlib.figure.Figure`.
     """
     if result is not None:
-        mu_true, mu_est, perm, n_matched, pi_true, pi_est = _components_from_result(result)
+        mu_true, mu_est, perm, n_matched, *_ = _components_from_result(result)
     else:
         if mu_true is None or mu_est is None:
             raise ValueError("pass either `result` or both `mu_true` and `mu_est`")
         mu_true, mu_est, perm, n_matched = align_recovered_components(mu_true, mu_est)
-        pi_true = None if pi_true is None else np.asarray(pi_true, dtype=float).ravel()
-        pi_est = None if pi_est is None else np.asarray(pi_est, dtype=float).ravel()
 
     x_true, labels = _skill_axis(mu_true.shape[1], skill_labels)
     x_est, _ = _skill_axis(mu_est.shape[1], skill_labels)
@@ -269,28 +265,24 @@ def plot_component_recovery(
         squeeze=False, sharex=True, sharey=True,
     )
     flat = axes.ravel()
-    k_shared = min(mu_true.shape[1], mu_est.shape[1])
     for i in range(n_matched):
         ax = flat[i]
         ax.plot(x_true, mu_true[i], **ASSUMED_KW)
         ax.plot(x_est, mu_est[perm[i]], **RECOVERED_KW)
-        title = f"component {i}"
-        if pi_true is not None and pi_est is not None:
-            title += f"   pi {pi_true[i]:.2f} -> {pi_est[perm[i]]:.2f}"
-        rmse = float(np.sqrt(np.mean(
-            (mu_true[i, :k_shared] - mu_est[perm[i], :k_shared]) ** 2
-        )))
-        title += f"\nRMSE {rmse:.3f}"
-        ax.set_title(title, fontsize=9)
+        ax.set_title(f"Component {i}", fontsize=9)
         _style_profile_axes(
             ax, x_true, labels,
             ylabel=(i % ncols == 0),
         )
     for j in range(n_matched, len(flat)):
         flat[j].set_visible(False)
-    flat[0].legend(fontsize=8, loc="lower right")
-    fig.suptitle("Assumed vs. recovered components", fontsize=12)
-    fig.tight_layout()
+
+    handles, labels_ = flat[0].get_legend_handles_labels()
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    fig.legend(
+        handles, labels_, loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=len(labels_), frameon=False, fontsize=8,
+    )
     if save is not None:
         _savefig(fig, save)
     return fig
@@ -1014,6 +1006,184 @@ def plot_recovery_distribution_comparison(
     return fig
 
 
+def _draw_component_panel_grouped(
+    ax, per_component_i, mu_true_row, x, labels, resolved_colors, group_order,
+    *, title, ylabel, xlabel,
+) -> None:
+    """Grouped within/between nested-whisker version of
+    `_draw_component_panel`: instead of thin translucent repeat curves +
+    a bold median line per group, draws one small offset cluster per
+    skill -- each group's mean with a nested within-dataset/total-SD
+    whisker (same layered-errorbar + hollow-marker convention as
+    `_plot_ofat_panel_decomposed`), groups spaced out side by side so
+    they're directly comparable at each skill position. The true value
+    is marked once per skill (`ASSUMED_KW`), since it doesn't depend on
+    which group estimated it.
+
+    What the inner/outer whisker layers mean is left to the figure's
+    caption, not explained on the figure itself -- two on-figure
+    approaches were tried and rendered poorly: an inline arrow annotation
+    on a real data point (which real point looks clearest depends on the
+    data, and is never a fully uncluttered spot for two arrows) and a
+    separate schematic key axes (still visually awkward even isolated
+    from the data). Caption-only was the one that actually read cleanly.
+    """
+    n_groups = len(group_order)
+    offsets = np.linspace(-0.3, 0.3, n_groups) if n_groups > 1 else np.array([0.0])
+
+    for name, offset in zip(group_order, offsets):
+        if name not in per_component_i:
+            continue
+        dataset_idxs, curves = per_component_i[name]  # curves: (n_repeats, k)
+        means, within_sds, total_sds = [], [], []
+        for j in range(curves.shape[1]):
+            decomp = within_between_variance(curves[:, j], dataset_idxs)
+            means.append(float(curves[:, j].mean()))
+            within_sds.append(decomp["within_sd"])
+            total_sds.append(decomp["total_sd"])
+        means = np.array(means)
+        within_sds = np.array(within_sds)
+        total_sds = np.array(total_sds)
+        color = resolved_colors[name]
+        xo = x + offset
+
+        ax.errorbar(xo, means, yerr=total_sds, fmt="none", color=color,
+                    elinewidth=0.8, capsize=2, capthick=0.8, alpha=0.5, zorder=2)
+        ax.errorbar(xo, means, yerr=within_sds, fmt="none", color=color,
+                    elinewidth=1.8, capsize=0, zorder=3)
+        ax.scatter(xo, means, color="#ffffff", edgecolor=color, s=14,
+                   linewidths=1.0, zorder=4, label=name)
+
+    # Deliberately lighter than ASSUMED_KW (used by _draw_component_panel's
+    # scatter-cloud style, left as-is) -- that convention's heavy black
+    # line/markers read fine against thin translucent repeat curves, but
+    # competed with the grouped whisker clusters here. This is just a thin
+    # gray trend line threading through the whiskers, zorder=1 so it sits
+    # behind every group's markers/whiskers rather than drawn on top of them.
+    ax.plot(x, mu_true_row, color="0.45", linewidth=1.0, zorder=1, label="Assumed")
+    ax.set_title(title, fontsize=9)
+    _style_profile_axes(ax, x, labels, ylabel=ylabel, xlabel=xlabel)
+
+
+def plot_recovery_distribution_grouped(
+    groups: dict[str, list[tuple[int, SimulationResult]]],
+    *,
+    group_colors: dict[str, str] | None = None,
+    skill_labels: Sequence | None = None,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+):
+    """Per-archetype skill-profile recovery, grouped by scheme, with a
+    within-dataset/between-dataset nested-whisker decomposition instead
+    of `plot_recovery_distribution`'s thin-repeat-curves + median-line
+    convention -- answers both "does recovery match ground truth" and
+    "how stable is it, and is that stability from the estimation
+    procedure or the sampled data" in one figure, using the same visual
+    language as `plot_ofat_sensitivity`'s decomposed rows.
+
+    ``groups`` (e.g. ``{"Random": rows, "K-means": rows, "Informed":
+    rows}``) maps each scheme name to a list of ``(dataset_idx,
+    SimulationResult)`` pairs from `run_nested_init_repeats` -- NOT plain
+    `SimulationResult` sequences like `plot_recovery_distribution` takes,
+    since the within/between decomposition needs to know which repeats
+    share a dataset. Every group must share the same true `mu` overall
+    (`run_nested_init_repeats` called on conditions that only differ in
+    `initialization`, same rule `_prepare_component_groups` enforces via
+    its own ValueError).
+
+    For each true archetype (one panel each, same 2-column grid as
+    `plot_recovery_distribution`) and each skill on the x-axis, draws one
+    small offset cluster per group: mean, within-dataset SD as a bold
+    inner bar, total SD (within + between, in quadrature) as a lighter
+    outer whisker -- `within_between_variance`, grouped by each repeat's
+    `dataset_idx`. Groups share one true-value marker per skill, drawn
+    once since ground truth doesn't depend on which scheme estimated it.
+    Returns the :class:`matplotlib.figure.Figure`.
+    """
+    group_items = list(groups.items())
+    mu_true = _as_matrix(group_items[0][1][0][1].data.mu)
+    for name, rows in group_items[1:]:
+        if not np.allclose(_as_matrix(rows[0][1].data.mu), mu_true):
+            raise ValueError(
+                f"group {name!r} does not share the same true mu as the first group -- "
+                f"groups must be repeated fits of the same true population, not different ones"
+            )
+
+    n_true = mu_true.shape[0]
+    k = min(
+        mu_true.shape[1],
+        min(_as_matrix(r.model.mu).shape[1] for rows in groups.values() for _, r in rows),
+    )
+    x, labels = _skill_axis(k, skill_labels)
+    resolved_colors = _resolve_group_colors(groups, group_colors)
+
+    # per_component[i][name] -> (dataset_idxs, aligned_curves), aligned_curves
+    # shape (n_repeats, k) -- same alignment rule _align_component_groups
+    # uses, just keeping each repeat's dataset_idx alongside its aligned
+    # curve instead of discarding it.
+    per_component: dict[int, dict[str, tuple[np.ndarray, np.ndarray]]] = {
+        i: {} for i in range(n_true)
+    }
+    for name, rows in group_items:
+        curves_by_component: dict[int, list[np.ndarray]] = {i: [] for i in range(n_true)}
+        dataset_idx_by_component: dict[int, list[int]] = {i: [] for i in range(n_true)}
+        for dataset_idx, result in rows:
+            mu_est = _as_matrix(result.model.mu)
+            perm = align_components(mu_true[:, :k], mu_est[:, :k])
+            n_matched = min(n_true, perm.size)
+            for i in range(n_matched):
+                curves_by_component[i].append(mu_est[perm[i], :k])
+                dataset_idx_by_component[i].append(dataset_idx)
+        for i in range(n_true):
+            if curves_by_component[i]:
+                per_component[i][name] = (
+                    np.array(dataset_idx_by_component[i]),
+                    np.stack(curves_by_component[i]),
+                )
+
+    matched = [i for i in range(n_true) if per_component[i]]
+    n_matched = len(matched)
+    comp_cols = 2
+    comp_rows = math.ceil(n_matched / comp_cols)
+    group_order = list(groups.keys())
+
+    fig, axes = plt.subplots(
+        comp_rows, comp_cols, figsize=figsize or (3.6 * comp_cols, 3.0 * comp_rows),
+        squeeze=False, sharex=True, sharey=True,
+    )
+    flat = axes.ravel()
+    for panel, i in enumerate(matched):
+        row, col = divmod(panel, comp_cols)
+        _draw_component_panel_grouped(
+            # ylabel=False on every panel -- fig.supylabel(...) below carries
+            # the "Recovered Proficiency" label for the whole figure, same
+            # reason plot_recovery_distribution's own per-panel calls do this
+            # (a per-panel ylabel here would collide with it, confirmed by
+            # rendering: the two overlapped at the left margin).
+            flat[panel], per_component[i], mu_true[i, :k], x, labels, resolved_colors, group_order,
+            title=f"Component {i}", ylabel=False, xlabel=(row == comp_rows - 1),
+        )
+    for j in range(n_matched, len(flat)):
+        flat[j].set_visible(False)
+
+    handles, labels_ = flat[0].get_legend_handles_labels()
+    fig.supylabel("Recovered Proficiency")
+    # The within-dataset/total-SD whisker convention is explained in the
+    # caption text, not on the figure itself -- both an inline arrow
+    # annotation on a real data point and a separate schematic key axes
+    # were tried and rendered poorly (cluttered/ambiguous, and still
+    # visually awkward even isolated from the data); caption-only is the
+    # one that actually reads cleanly.
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    fig.legend(
+        handles, labels_, loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=len(labels_), frameon=False, fontsize=8,
+    )
+    if save is not None:
+        _savefig(fig, save)
+    return fig
+
+
 def _resolve_per_row(value, n_rows: int, name: str) -> list:
     """Broadcast a scalar to ``n_rows`` copies, or validate a given
     sequence already has length ``n_rows`` (one per row/metric)."""
@@ -1045,8 +1215,17 @@ def _plot_ofat_panel(
     else:
         x = np.arange(len(levels))
 
-    ax.errorbar(x, stats["mean"], yerr=stats["std"], marker="o", markersize=5,
-                capsize=4, linewidth=2.2, color="#1f77b4")
+    # Structural error bar + connecting line first (no marker here --
+    # fmt="none" -- so the line and whisker caps stay clean rather than
+    # a solid marker sitting on top of/breaking the line), then a
+    # hollow white-core marker stamped on last, so the trajectory line
+    # visibly stops at the marker's edge instead of running through a
+    # solid dot.
+    ax.errorbar(x, stats["mean"], yerr=stats["std"], fmt="none",
+                color="#1f77b4", elinewidth=1.6, capsize=4, capthick=1.2, zorder=2)
+    ax.plot(x, stats["mean"], color="#1f77b4", linewidth=1.5, zorder=3)
+    ax.scatter(x, stats["mean"], color="#ffffff", edgecolor="#1f77b4",
+               s=28, linewidths=1.4, zorder=4)
     if reference_line == "linear" and numeric:
         x0, y0 = x[0], stats["mean"].iloc[0]
         if x0 > 0 and np.isfinite(y0) and y0 > 0:
@@ -1077,10 +1256,115 @@ def _plot_ofat_panel(
     if show_title:
         ax.set_title(humanize_label(factor, label_map), fontsize=10)
     ax.grid(alpha=0.3, linewidth=0.6)
+    # Top/right spines are pure chrome -- dropping them opens the panel up
+    # instead of boxing it in, and leaves the left/bottom axes (which
+    # actually carry tick information) as the only visible frame.
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     if show_ylabel:
         ax.set_ylabel(humanize_label(metric, label_map), fontsize=10)
     # guard: a non-numeric factor's panel never gets a reference line, so
     # only add a legend where there's actually a labeled artist to show.
+    if show_legend and ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=8, loc="upper left")
+
+
+def _plot_ofat_panel_decomposed(
+    ax, results, factor, metric, baseline_dict, log_x, log_y, reference_line, label_map,
+    *, show_title: bool, show_ylabel: bool, show_legend: bool,
+) -> None:
+    """Like `_plot_ofat_panel`, but for a row decomposing `metric`'s
+    variance into within-dataset (estimation) and between-dataset
+    (sampling) components, via `within_between_variance` grouped by
+    `results["dataset_idx"]` -- requires `results` to come from
+    `run_nested_ofat_design`, not the flat `run_design`.
+
+    Plots the same mean line as `_plot_ofat_panel`, but with two layered
+    error bars instead of one, both in the metric's own units (SD, not
+    variance -- see `within_between_variance`'s docstring for why they
+    don't simply add): a thin, capped, muted-gray outer whisker for total
+    SD (within + between, what a flat mean+-std row would have shown) and
+    a thick, cap-less, blue inner bar for within-dataset SD alone -- two
+    distinct colors rather than one color at two opacities, so the two
+    sources of spread read as different things at a glance rather than
+    one looking like a faded copy of the other. The visual gap between
+    them is not literally a "between-group SD" (SDs of independent
+    components combine in quadrature, not additively) -- report the two
+    numbers directly in text/tables rather than asking a reader to
+    eyeball the gap.
+    """
+    other_factors = [f for f in FACTOR_LEVELS if f != factor and f in results.columns]
+    mask = np.ones(len(results), dtype=bool)
+    for f in other_factors:
+        mask &= results[f] == baseline_dict[f]
+    subset = results.loc[mask]
+
+    levels = [lv for lv in FACTOR_LEVELS[factor] if lv in set(subset[factor])]
+    means, within_sds, total_sds = [], [], []
+    for lv in levels:
+        level_subset = subset.loc[subset[factor] == lv]
+        decomp = within_between_variance(
+            level_subset[metric].to_numpy(), level_subset["dataset_idx"].to_numpy()
+        )
+        means.append(level_subset[metric].mean())
+        within_sds.append(decomp["within_sd"])
+        total_sds.append(decomp["total_sd"])
+    means = np.asarray(means)
+    within_sds = np.asarray(within_sds)
+    total_sds = np.asarray(total_sds)
+
+    numeric = all(isinstance(lv, (int, float)) and not isinstance(lv, bool) for lv in levels)
+    if numeric:
+        x = np.asarray(levels, dtype=float)
+    else:
+        x = np.arange(len(levels))
+
+    color_total = "#8c96a3"   # muted slate gray -- outer/total-SD layer
+    color_within = "#1f77b4"  # project's standard blue -- inner/within-dataset layer
+
+    # Layered, structural-only error bars first (fmt="none" -- no markers,
+    # so caps/bars stay clean), then the mean trajectory line, then a
+    # hollow white-core marker stamped on top -- same ordering/reasoning
+    # as _plot_ofat_panel, just with two whisker layers instead of one.
+    # Outer: thin, capped, total SD. Inner: thick, cap-less, within-
+    # dataset SD -- no caps on the inner bar so it doesn't compete
+    # visually with the outer one's caps at the same x position.
+    ax.errorbar(x, means, yerr=total_sds, fmt="none", color=color_total,
+                elinewidth=1.0, capsize=4, capthick=1.0, alpha=0.9, zorder=2,
+                label="Total spread" if show_legend else None)
+    ax.errorbar(x, means, yerr=within_sds, fmt="none", color=color_within,
+                elinewidth=2.6, capsize=0, zorder=3,
+                label="Within-dataset spread" if show_legend else None)
+    ax.plot(x, means, color=color_within, linewidth=1.5, zorder=4)
+    ax.scatter(x, means, color="#ffffff", edgecolor=color_within,
+               s=28, linewidths=1.4, zorder=5)
+
+    if reference_line == "linear" and numeric:
+        x0, y0 = x[0], means[0]
+        if x0 > 0 and np.isfinite(y0) and y0 > 0:
+            ax.plot(x, y0 * (x / x0), color="0.3", linewidth=1.8,
+                     linestyle="--", label="linear reference")
+    if log_x and numeric:
+        ax.set_xscale("log")
+        ax.minorticks_off()
+    if log_y:
+        ax.set_yscale("log")
+    if baseline_dict[factor] in levels:
+        ref_x = float(baseline_dict[factor]) if numeric else levels.index(baseline_dict[factor])
+        _mark_reference_level(ax, ref_x)
+
+    if numeric:
+        ax.set_xticks(x)
+    else:
+        ax.set_xticks(np.arange(len(levels)))
+    ax.set_xticklabels([str(lv) for lv in levels], rotation=30, ha="right", fontsize=9)
+    if show_title:
+        ax.set_title(humanize_label(factor, label_map), fontsize=10)
+    ax.grid(alpha=0.3, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if show_ylabel:
+        ax.set_ylabel(humanize_label(metric, label_map), fontsize=10)
     if show_legend and ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8, loc="upper left")
 
@@ -1094,6 +1378,7 @@ def plot_ofat_sensitivity(
     log_y: bool | Sequence[bool] = False,
     sharey: bool = False,
     reference_line: str | None | Sequence[str | None] = None,
+    decompose: bool | Sequence[bool] = False,
     max_cols: int = 4,
     figsize: tuple[float, float] | None = None,
     labels: dict[str, str] | None = None,
@@ -1169,14 +1454,32 @@ def plot_ofat_sensitivity(
     ``labels={"mu_rmse": "..."}`` to override just one entry for this figure;
     anything neither in ``labels`` nor :data:`METRIC_LABELS` falls back to
     :func:`src.style.humanize_label`'s generic Title Case conversion.
+
+    ``decompose`` is per-row like ``log_y``/``reference_line``. A row with
+    ``decompose=True`` plots a within-dataset/between-dataset variance
+    decomposition instead of a flat mean +/- std -- see
+    ``src.simulations.metrics.within_between_variance`` and
+    ``src.simulations.run.run_nested_ofat_design``, whose nested
+    ``dataset_idx``/``fit_idx`` structure this requires: ``results`` must
+    come from ``run_nested_ofat_design``, not the flat ``run_design``, for
+    any row with ``decompose=True`` (a row with ``decompose=False`` works
+    with either, since it only ever reads ``metric`` itself).
+
     Returns the :class:`matplotlib.figure.Figure`.
     """
     metrics = [metric] if isinstance(metric, str) else list(metric)
     log_y_per_row = _resolve_per_row(log_y, len(metrics), "log_y")
     reference_line_per_row = _resolve_per_row(reference_line, len(metrics), "reference_line")
+    decompose_per_row = _resolve_per_row(decompose, len(metrics), "decompose")
     for rl in reference_line_per_row:
         if rl not in (None, "linear"):
             raise ValueError(f"reference_line must be None or 'linear', got {rl!r}")
+    if any(decompose_per_row) and "dataset_idx" not in results.columns:
+        raise ValueError(
+            "decompose=True requires results from run_nested_ofat_design "
+            "(no 'dataset_idx' column found) -- the flat run_design output "
+            "has no way to group fits by shared dataset."
+        )
 
     factors = list(factors) if factors is not None else sorted(FACTOR_LEVELS)
     baseline_dict = baseline.to_dict()
@@ -1205,16 +1508,18 @@ def plot_ofat_sensitivity(
     # the exported figure.
     if multi_metric:
         for row, m in enumerate(metrics):
+            panel_fn = _plot_ofat_panel_decomposed if decompose_per_row[row] else _plot_ofat_panel
             for col, factor in enumerate(factors):
-                _plot_ofat_panel(
+                panel_fn(
                     axes[row][col], results, factor, m, baseline_dict,
                     log_x, log_y_per_row[row], reference_line_per_row[row], label_map,
                     show_title=(row == 0), show_ylabel=(col == 0), show_legend=(col == 0),
                 )
     else:
+        panel_fn = _plot_ofat_panel_decomposed if decompose_per_row[0] else _plot_ofat_panel
         flat = axes.ravel()
         for idx, factor in enumerate(factors):
-            _plot_ofat_panel(
+            panel_fn(
                 flat[idx], results, factor, metrics[0], baseline_dict,
                 log_x, log_y_per_row[0], reference_line_per_row[0], label_map,
                 show_title=True, show_ylabel=(idx % ncols == 0), show_legend=(idx == 0),

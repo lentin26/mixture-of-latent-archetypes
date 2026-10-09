@@ -272,3 +272,64 @@ def nadeau_bengio_test(
         "excludes_zero": bool(ci_lo > 0 or ci_hi < 0),
         "p_value": p_value,
     }
+
+
+def within_between_variance(values: np.ndarray, group_ids: np.ndarray) -> dict:
+    """Decomposes the total variance of `values` into within-group and
+    between-group components -- the law of total variance, the same
+    decomposition behind a one-way random-effects ANOVA / intraclass
+    correlation. Built for `run_nested_ofat_design`'s nested dataset x
+    fit structure (`group_ids` = `dataset_idx`): within-group variance is
+    the (estimation) spread across repeated fits of the *same* dataset;
+    between-group variance is the (sampling) spread across *different*
+    datasets.
+
+    Requires a balanced design -- every group must have the same number
+    of observations `n_per_group` (raises `ValueError` otherwise); an
+    unbalanced design needs a different ANOVA formula this doesn't
+    implement.
+
+    `between_var` is NOT simply `Var(group_means)`: each group mean is
+    itself estimated from only `n_per_group` observations, so its own
+    variance already contains `within_var / n_per_group` of noise that
+    isn't genuine between-group signal. Subtracting that out (and
+    clipping at 0, since the raw estimate can go slightly negative when
+    the true between-group variance is near zero) gives an unbiased
+    estimate of the true between-group variance -- the standard
+    correction used in variance-component/ICC estimation.
+
+    Returns `{"within_var", "between_var", "total_var", "within_sd",
+    "total_sd"}`. Deliberately returns standard deviations (not just
+    variances) for `within`/`total`: plotting code needs them in the
+    metric's own units, and `total_sd != within_sd + between_sd` --
+    standard deviations of independent components combine in quadrature
+    (`total_sd = sqrt(within_sd**2 + between_sd**2)`), not additively, so
+    callers should not treat the gap between `within_sd` and `total_sd`
+    as literally equal to a "between-group SD".
+    """
+    values = np.asarray(values, dtype=float)
+    group_ids = np.asarray(group_ids)
+    unique_groups = np.unique(group_ids)
+    group_sizes = np.array([int((group_ids == g).sum()) for g in unique_groups])
+    if not np.all(group_sizes == group_sizes[0]):
+        raise ValueError(
+            "within_between_variance requires a balanced design (equal "
+            f"observations per group); got sizes {group_sizes.tolist()}"
+        )
+    n_per_group = int(group_sizes[0])
+
+    group_means = np.array([values[group_ids == g].mean() for g in unique_groups])
+    within_vars = np.array([values[group_ids == g].var(ddof=1) for g in unique_groups])
+    within_var = float(within_vars.mean())
+
+    naive_between_var = float(group_means.var(ddof=1))
+    between_var = max(0.0, naive_between_var - within_var / n_per_group)
+
+    total_var = within_var + between_var
+    return {
+        "within_var": within_var,
+        "between_var": between_var,
+        "total_var": total_var,
+        "within_sd": float(np.sqrt(within_var)),
+        "total_sd": float(np.sqrt(total_var)),
+    }

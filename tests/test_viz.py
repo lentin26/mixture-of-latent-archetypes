@@ -32,6 +32,7 @@ from src.simulations.viz import (
     plot_parameter_recovery,
     plot_recovery_distribution,
     plot_recovery_distribution_comparison,
+    plot_recovery_distribution_grouped,
     plot_recovery_scatter,
     plot_setup_diagnostics,
     plot_theta_pi_recovery_distribution,
@@ -141,9 +142,17 @@ def test_recovery_from_simulation_result():
     )
     result = run_condition(cond, seed=0, return_fit=True)
     fig = plot_component_recovery(result)
-    assert len([ax for ax in fig.axes if ax.get_visible()]) == 2
-    # titles carry the pi_true -> pi_est annotation when a result is passed
-    assert "pi" in [ax for ax in fig.axes if ax.get_visible()][0].get_title()
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 2
+    # panel titles are just "Component {i}" -- no title/suptitle, no baked-in
+    # pi/RMSE annotation (reported separately, not on the publication figure)
+    assert {ax.get_title() for ax in visible} == {"Component 0", "Component 1"}
+    assert fig._suptitle is None
+    # legend is one shared horizontal row below the figure, not per-panel
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    legend = fig.legends[0]
+    assert {t.get_text() for t in legend.get_texts()} == {"Assumed", "Recovered"}
+    assert legend._ncols == len(legend.get_texts())
 
 
 # --------------------------------------------------------------------------- #
@@ -365,6 +374,78 @@ def test_recovery_distribution_combined_shares_ticks_within_component_row():
     # second (non-leftmost) component panel shares the first's y-axis and hides its own labels
     assert component_axes[0].get_shared_y_axes().joined(component_axes[0], component_axes[1])
     assert all(not t.get_visible() for t in component_axes[1].get_yticklabels())
+
+
+# --------------------------------------------------------------------------- #
+# plot_recovery_distribution_grouped (grouped within/between nested whiskers)
+# --------------------------------------------------------------------------- #
+def _nested_init_scheme_groups(n_datasets=2, n_fits=2):
+    from dataclasses import replace
+    from src.simulations.run import run_nested_init_repeats
+    return {
+        "Random": run_nested_init_repeats(replace(SMALL_VIZ, initialization="random"), n_datasets=n_datasets, n_fits=n_fits, base_seed=0),
+        "K-means": run_nested_init_repeats(replace(SMALL_VIZ, initialization="k-means"), n_datasets=n_datasets, n_fits=n_fits, base_seed=0),
+    }
+
+
+def test_recovery_distribution_grouped_has_one_panel_per_component():
+    groups = _nested_init_scheme_groups()
+    fig = plot_recovery_distribution_grouped(groups=groups)
+    visible = [a for a in fig.axes if a.get_visible()]
+    assert len(visible) == SMALL_VIZ.n_archetypes
+    assert {a.get_title() for a in visible} == {f"Component {i}" for i in range(SMALL_VIZ.n_archetypes)}
+
+
+def test_recovery_distribution_grouped_draws_two_errorbars_per_group_per_panel():
+    groups = _nested_init_scheme_groups()  # 2 groups: Random, K-means
+    fig = plot_recovery_distribution_grouped(groups=groups)
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    # 2 ErrorbarContainers per group (outer total-SD, inner within-dataset-SD) x 2 groups
+    assert len(ax.containers) == 4
+
+
+def test_recovery_distribution_grouped_offsets_groups_apart_on_x_axis():
+    import matplotlib.collections as mcollections
+
+    groups = _nested_init_scheme_groups()
+    fig = plot_recovery_distribution_grouped(groups=groups)
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    # Each group's hollow markers are drawn via ax.scatter (a PathCollection) --
+    # errorbar(fmt="none") separately registers LineCollections in
+    # ax.collections too, so filter to PathCollection specifically. Their
+    # x-offsets should differ (that's the whole point of "grouped") rather
+    # than sitting on top of each other at the same skill position.
+    scatters = [c for c in ax.collections if isinstance(c, mcollections.PathCollection)]
+    assert len(scatters) == 2
+    x0 = np.asarray(scatters[0].get_offsets())[:, 0]
+    x1 = np.asarray(scatters[1].get_offsets())[:, 0]
+    assert not np.allclose(x0, x1)
+
+
+def test_recovery_distribution_grouped_rejects_mismatched_true_mu():
+    from dataclasses import replace
+    from src.simulations.run import run_nested_init_repeats
+    group_a = run_nested_init_repeats(SMALL_VIZ, n_datasets=1, n_fits=2, base_seed=0)
+    group_b = run_nested_init_repeats(SMALL_VIZ, n_datasets=1, n_fits=2, base_seed=1)  # different dataset -> different true mu
+    with pytest.raises(ValueError, match="does not share the same true mu"):
+        plot_recovery_distribution_grouped(groups={"A": group_a, "B": group_b})
+
+
+def test_recovery_distribution_grouped_shares_legend_and_group_names():
+    groups = _nested_init_scheme_groups()
+    fig = plot_recovery_distribution_grouped(groups=groups)
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    legend_labels = {t.get_text() for t in fig.legends[0].get_texts()}
+    # "Assumed" (the true-value marker) appears once per panel, not once per
+    # group, so it only shows up in the legend if a group didn't suppress it
+    assert {"Random", "K-means"}.issubset(legend_labels)
+
+
+def test_recovery_distribution_grouped_saves_to_file(tmp_path):
+    groups = _nested_init_scheme_groups()
+    save_path = tmp_path / "grouped.pdf"
+    plot_recovery_distribution_grouped(groups=groups, save=str(save_path))
+    assert save_path.exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -624,6 +705,51 @@ def test_ofat_sensitivity_single_element_metric_list_matches_string():
     )
     assert len(fig_str.axes) == len(fig_list.axes) == 1
     assert fig_str.axes[0].get_title() == fig_list.axes[0].get_title()
+
+
+# --------------------------------------------------------------------------- #
+# plot_ofat_sensitivity: decompose (within/between-dataset variance)
+# --------------------------------------------------------------------------- #
+def _nested_sensitivity_results():
+    from src.simulations.run import run_nested_ofat_design
+
+    results = run_nested_ofat_design(
+        baseline=SMALL_VIZ, factors=["n_learners", "n_skills"],
+        n_datasets=2, n_fits=2, base_seed=0,
+    )
+    results = results.copy()
+    results["time_per_iter_sec"] = results["train_time_sec"] / results["n_em_iters"]
+    return results
+
+
+def test_ofat_sensitivity_decompose_requires_nested_results():
+    results = _scalability_results()  # flat run_design output, no dataset_idx
+    with pytest.raises(ValueError, match="run_nested_ofat_design"):
+        plot_ofat_sensitivity(
+            results, factors=["n_learners"], metric="mu_rmse", baseline=SMALL_VIZ, decompose=True,
+        )
+
+
+def test_ofat_sensitivity_decompose_draws_two_errorbars_per_panel():
+    results = _nested_sensitivity_results()
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric="mu_rmse", baseline=SMALL_VIZ, decompose=True,
+    )
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    # ErrorbarContainer is what ax.errorbar(...) registers in ax.containers --
+    # one decomposed panel draws two (outer total-SD, inner within-dataset-SD).
+    assert len(ax.containers) == 2
+
+
+def test_ofat_sensitivity_decompose_is_per_row():
+    results = _nested_sensitivity_results()
+    fig = plot_ofat_sensitivity(
+        results, factors=["n_learners"], metric=["mu_rmse", "time_per_iter_sec"],
+        baseline=SMALL_VIZ, decompose=[True, False],
+    )
+    decomposed_ax, flat_ax = fig.axes[0], fig.axes[1]
+    assert len(decomposed_ax.containers) == 2
+    assert len(flat_ax.containers) == 1
 
 
 def test_ofat_sensitivity_uses_nice_labels_by_default():

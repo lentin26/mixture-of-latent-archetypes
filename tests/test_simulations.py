@@ -28,6 +28,7 @@ from src.simulations.metrics import (
     paired_bootstrap_diff,
     pi_rmse,
     repeat_alignment_spread,
+    within_between_variance,
 )
 from src.simulations.run import (
     default_m_grid,
@@ -39,6 +40,8 @@ from src.simulations.run import (
     run_m_selection_evaluation,
     run_m_sweep,
     run_m_sweep_with_repeats,
+    run_nested_init_repeats,
+    run_nested_ofat_design,
     run_sample_repeats,
     split_holdout,
     summarize_m_sweep,
@@ -304,6 +307,47 @@ def test_holm_bonferroni_none_significant():
     assert holm_bonferroni([0.5, 0.6, 0.7], alpha=0.05) == [False, False, False]
 
 
+def test_within_between_variance_matches_hand_computation():
+    # 3 groups of 3, each group's own values spread by exactly 1 unit apart
+    # (var(ddof=1) == 1 for every group) with group means 2, 5, 8 apart by 3.
+    values = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=float)
+    group_ids = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2])
+
+    result = within_between_variance(values, group_ids)
+
+    expected_within_var = 1.0  # var([1,2,3], ddof=1) == 1, same for each group
+    expected_naive_between_var = np.array([2.0, 5.0, 8.0]).var(ddof=1)  # == 9.0
+    expected_between_var = expected_naive_between_var - expected_within_var / 3
+
+    assert np.isclose(result["within_var"], expected_within_var)
+    assert np.isclose(result["between_var"], expected_between_var)
+    assert np.isclose(result["total_var"], result["within_var"] + result["between_var"])
+    assert np.isclose(result["within_sd"], np.sqrt(expected_within_var))
+    assert np.isclose(result["total_sd"], np.sqrt(result["total_var"]))
+
+
+def test_within_between_variance_clips_negative_between_at_zero():
+    # All three group means are exactly 1.0 -- zero true between-group
+    # variance, so the correction (within_var / n_per_group) would push the
+    # naive estimate negative without clipping.
+    values = np.array([0.0, 2.0, 0.5, 1.5, 0.9, 1.1])
+    group_ids = np.array([0, 0, 1, 1, 2, 2])
+
+    result = within_between_variance(values, group_ids)
+
+    naive_between_var = np.array([1.0, 1.0, 1.0]).var(ddof=1)  # group means all 1.0 -> 0
+    assert np.isclose(naive_between_var, 0.0)
+    assert result["between_var"] == 0.0
+    assert np.isclose(result["total_var"], result["within_var"])  # between contributes nothing
+
+
+def test_within_between_variance_rejects_unbalanced_groups():
+    values = np.array([1.0, 2.0, 3.0, 4.0])
+    group_ids = np.array([0, 0, 0, 1])  # group 0 has 3 obs, group 1 has 1
+    with pytest.raises(ValueError, match="balanced"):
+        within_between_variance(values, group_ids)
+
+
 def test_nadeau_bengio_matches_hand_computation():
     a = np.array([0.6, 0.62, 0.58, 0.65, 0.61])
     b = np.array([0.5, 0.52, 0.48, 0.55, 0.51])
@@ -461,6 +505,48 @@ def test_run_init_repeats_holds_data_fixed_and_varies_only_init():
     assert {r.metrics["condition_id"] for r in results} == {random_only.condition_id()}
     for r in results:
         assert r.model.mu.shape == (random_only.n_archetypes, random_only.n_skills)
+
+
+def test_run_nested_init_repeats_shape_and_dataset_grouping():
+    random_only = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
+    rows = run_nested_init_repeats(random_only, n_datasets=2, n_fits=3, base_seed=0)
+
+    assert len(rows) == 2 * 3
+    dataset_idxs = [d for d, _ in rows]
+    assert sorted(set(dataset_idxs)) == [0, 1]
+    assert dataset_idxs.count(0) == 3 and dataset_idxs.count(1) == 3
+    # fits sharing a dataset_idx share the exact same simulated dataset...
+    for target in (0, 1):
+        same_dataset_results = [r for d, r in rows if d == target]
+        assert all(r.data is same_dataset_results[0].data for r in same_dataset_results)
+    # ...but different dataset_idx values don't.
+    assert rows[0][1].data is not rows[3][1].data  # rows[0]=dataset 0, rows[3]=dataset 1 (3 fits each)
+
+
+def test_run_nested_ofat_design_row_count_and_grouping_columns():
+    results = run_nested_ofat_design(
+        baseline=SMALL, factors=["n_archetypes"], n_datasets=2, n_fits=2, base_seed=0,
+    )
+    n_conditions = len(ofat_design(baseline=SMALL, factors=["n_archetypes"]))
+
+    assert isinstance(results, pd.DataFrame)
+    assert len(results) == n_conditions * 2 * 2
+    assert {"dataset_idx", "fit_idx"}.issubset(results.columns)
+    assert METRIC_KEYS.issubset(results.columns)
+
+    for condition_id, by_condition in results.groupby("condition_id"):
+        assert set(by_condition["dataset_idx"]) == {0, 1}
+        for dataset_idx, by_dataset in by_condition.groupby("dataset_idx"):
+            assert sorted(by_dataset["fit_idx"]) == [0, 1]
+
+
+def test_run_nested_ofat_design_dataset_idx_corresponds_to_distinct_datasets():
+    # Same data_seed formula run_nested_ofat_design uses internally (base_seed +
+    # 10_007 * dataset_idx) -- confirms different dataset_idx values really do
+    # draw different simulated data, not just relabel the same one.
+    data_0 = generate_dataset(SMALL, seed=0 + 10_007 * 0)
+    data_1 = generate_dataset(SMALL, seed=0 + 10_007 * 1)
+    assert not np.array_equal(np.nan_to_num(data_0.X, nan=-1.0), np.nan_to_num(data_1.X, nan=-1.0))
 
 
 def test_run_sample_repeats_holds_population_fixed_and_varies_the_sample():

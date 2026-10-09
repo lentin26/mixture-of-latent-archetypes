@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 from src.mola import MoLA
 from src.simulations.dgp import SimulatedDataset, generate_dataset, resample_dataset
 from src.simulations.factors import (
+    BASELINE,
     SEPARATION_LEVELS,
     SimulationCondition,
     ofat_design,
@@ -599,6 +600,92 @@ def run_design(
     for condition in conditions:
         for seed in seeds:
             rows.append(run_condition(condition, seed=seed))
+    return pd.DataFrame(rows)
+
+
+def run_nested_init_repeats(
+    condition: SimulationCondition,
+    n_datasets: int = 3,
+    n_fits: int = 3,
+    base_seed: int = 0,
+) -> list[tuple[int, SimulationResult]]:
+    """Nested replication for ONE fixed condition: `n_datasets` independent
+    datasets, each refit `n_fits` times varying only the EM init/fit seed
+    (`run_init_repeats`'s own inner loop, reused as-is) -- the same nested
+    structure as `run_nested_ofat_design`, but for a single condition
+    rather than an OFAT sweep, and returning full `SimulationResult`s (so
+    `.model.mu`/`.model.theta`/`.model.pi` are accessible) instead of a
+    flat metrics DataFrame.
+
+    Returns a list of `(dataset_idx, SimulationResult)` pairs, length
+    `n_datasets * n_fits` -- group by `dataset_idx` to decompose variance
+    (`within_between_variance`) on any per-repeat quantity, e.g. a
+    recovered parameter array's own entries, the way
+    `run_nested_ofat_design`'s caller does for scalar metrics.
+    """
+    rows: list[tuple[int, SimulationResult]] = []
+    for dataset_idx in range(n_datasets):
+        data_seed = base_seed + 10_007 * dataset_idx
+        init_seed_base = base_seed + 10_009 * dataset_idx
+        results = run_init_repeats(
+            condition, data_seed=data_seed, n_repeats=n_fits, base_init_seed=init_seed_base,
+        )
+        for result in results:
+            rows.append((dataset_idx, result))
+    return rows
+
+
+def run_nested_ofat_design(
+    factors: Sequence[str] | None = None,
+    baseline: SimulationCondition = BASELINE,
+    n_datasets: int = 3,
+    n_fits: int = 3,
+    base_seed: int = 0,
+) -> pd.DataFrame:
+    """OFAT sweep with a nested dataset x fit replication structure, for
+    decomposing each metric's total variance into within-dataset
+    (estimation) and between-dataset (sampling) components -- see
+    notebooks/simulation-study.ipynb, "Parameter Recovery, Stability, and
+    Scalability", and `src.simulations.metrics.within_between_variance`.
+
+    For each OFAT condition, draws `n_datasets` independent datasets
+    (reusing `run_init_repeats`'s `data_seed`), and for each dataset
+    fits `n_fits` times varying only the EM init/fit seed (exactly
+    `run_init_repeats`'s own inner loop -- this function doesn't
+    duplicate any data-generation/fitting logic, it just loops that
+    existing primitive over an OFAT condition grid and a range of
+    dataset seeds). `condition.initialization` stays whatever the OFAT
+    design uses (k-means by default, matching the rest of the OFAT
+    sweep elsewhere in this notebook) -- see `run_init_repeats`'s own
+    docstring for why that means the within-dataset component is
+    expected to come out near zero: k-means derives its start from the
+    data itself, so repeating the fit on the same dataset mostly
+    re-measures a different RNG seed, not genuine sensitivity to where
+    EM starts.
+
+    Returns one row per (condition, dataset_idx, fit_idx) with every
+    `_score_fit` metric column (and every `SimulationCondition` field,
+    via that dict's own `**data.condition.to_dict()`) plus `dataset_idx`
+    and `fit_idx` -- the same shape `run_design` produces, with these
+    two extra columns, so existing OFAT-panel grouping logic
+    (`results[factor] == baseline_dict[factor]`) works unchanged; only
+    a row that wants the variance decomposition needs to additionally
+    group by `dataset_idx`.
+    """
+    conditions = ofat_design(baseline=baseline, factors=factors)
+    rows: list[dict] = []
+    for condition in conditions:
+        for dataset_idx in range(n_datasets):
+            data_seed = base_seed + 10_007 * dataset_idx
+            init_seed_base = base_seed + 10_009 * dataset_idx
+            results = run_init_repeats(
+                condition, data_seed=data_seed, n_repeats=n_fits, base_init_seed=init_seed_base,
+            )
+            for fit_idx, result in enumerate(results):
+                row = dict(result.metrics)
+                row["dataset_idx"] = dataset_idx
+                row["fit_idx"] = fit_idx
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
