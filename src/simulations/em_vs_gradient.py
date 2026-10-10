@@ -13,6 +13,26 @@ Records, for each: the NLL trace, its wall-clock timestamps, and the
 number of iterations in which NLL *increased* (a direct violation of
 monotonic ascent -- EM/MM is guaranteed zero by construction; gradient
 methods are not guaranteed anything).
+
+A note on what "time/iterations to convergence" does and doesn't mean here.
+Every method shares the same literal stopping threshold (relative NLL change
+< tol between successive steps), which is necessary for a fair comparison
+but not sufficient: the threshold is not equally *trustworthy* across
+methods. For EM/MM (and empirically, though without EM/MM's guarantee,
+L-BFGS), monotonic ascent means a small step-to-step change really does
+signal proximity to a stationary point. Adam's trajectory is not monotonic,
+so the identical threshold can be satisfied by a plateau partway through a
+noisy, non-monotonic trajectory rather than by actual convergence -- the
+`adam_lr0.3` runs below are a concrete case of this, reporting
+`converged=True` while sitting at a worse final NLL than runs that took more
+steps. Because of this asymmetry, a single "time to convergence" number per
+method should not be read as a clean apples-to-apples speed comparison on
+its own; `nll_trace`/`time_trace` (the full trajectory, plotted by
+`src.simulations.viz.plot_em_vs_gradient`) is the primary comparison, since
+it reports actual NLL reached at actual wall-clock time for every method
+with no dependence on any method's own stopping rule. The scalar
+convergence/iteration numbers are still recorded and reported, but as a
+secondary summary alongside the trajectory, not a replacement for it.
 """
 
 from __future__ import annotations
@@ -126,10 +146,14 @@ def run(
                   f"monotonicity violations={viol}, wall-clock={res.time_trace[-1]:.3f}s, "
                   f"converged={res.converged}")
 
-    # 3) L-BFGS
+    # 3) L-BFGS -- same tol=1e-6 as EM/MM and Adam above, so "converged" means
+    # the same literal threshold for every method (a *necessary* but not
+    # sufficient condition for a fair speed comparison -- see the module-level
+    # note on why the figure, not this stopping-time number, is the primary
+    # comparison).
     res = fit_gradient(
         X, Q, mu_init, theta_init, pi_init,
-        optimizer="lbfgs", lr=1.0, max_iter=lbfgs_max_iter, tol=1e-8,
+        optimizer="lbfgs", lr=1.0, max_iter=lbfgs_max_iter, tol=1e-6,
     )
     nll = np.array(res.nll_trace)
     viol = int((np.diff(nll) > 1e-6).sum())
@@ -202,7 +226,7 @@ def stability_repeats(
 
         res = fit_gradient(
             X, Q, mu_init, theta_init, pi_init,
-            optimizer="lbfgs", lr=1.0, max_iter=lbfgs_max_iter, tol=1e-8,
+            optimizer="lbfgs", lr=1.0, max_iter=lbfgs_max_iter, tol=1e-6,
         )
         out["lbfgs"].append(res.mu)
 
