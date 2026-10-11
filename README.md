@@ -41,9 +41,25 @@ model = MoLA(
     tol=1e-5,                    # relative NLL convergence tolerance
     pseudo_likelihood=False,     # pseudo-likelihood M-step + Beta pseudo-counts
     random_state=746,            # seed for parameter initialization
+    init="k-means",              # default; "random" is kept as an explicit option
 )
 model.fit(X)                     # dense ndarray (NaN = missing) or a scipy sparse matrix
 ```
+
+`init="k-means"` (the default) seeds `theta` from each item's raw observed
+correct-response rate and `mu` from k-means cluster centroids of each
+learner's per-skill correctness on observed items (`pi` from the resulting
+cluster proportions) -- computed inside `fit`, since it needs `X`.
+`init="random"` instead draws an uninformative start with no data (`mu`
+entrywise Uniform(0, 1), `theta` fixed at the maximum-entropy point 0.5,
+`pi` uniform) and is kept as an explicit option, e.g. to reproduce older
+results or inspect EM's own sensitivity to initialization -- see
+`notebooks/simulation-study.ipynb`'s Estimation Stability section: the two
+schemes often reach essentially the same final log-likelihood but noticeably
+different recovery accuracy, because the fitting objective has a near-flat
+ridge along which very different `(mu, theta)` solutions fit the observed
+responses almost equally well. An uninformative start has no way to prefer
+the higher-recovery basin along that ridge the way a data-informed one does.
 
 Fitted parameters: `model.mu` `(n_components, n_skills)`, `model.pi`
 `(n_components, 1)`, `model.theta` `(n_items, 1)`. `model.nll_trace` is the
@@ -119,8 +135,158 @@ plot_component_recovery(result, save="figures/component_recovery.pdf")   # one p
 plot_component_recovery(result, layout="overlay")                       # all on one axes
 ```
 
-Also available: `plot_components(mu, ...)` for a single set of profiles, and
-`plot_recovery_scatter(result)` for a recovered-vs-assumed diagonal plot.
+Also available: `plot_components(mu, ...)` for a single set of profiles,
+`plot_recovery_scatter(result)` for a recovered-vs-assumed diagonal plot of
+`mu`, `plot_theta_recovery(result)` for the same but item difficulty
+(`1 - theta` by default -- pass `difficulty=False` for raw easiness), and
+`plot_parameter_recovery(result)`, which combines those two plus a third
+mixture-weight (`pi`) panel into one three-subplot figure (`pi`'s panel
+reuses `mu`'s Hungarian alignment, so all three panels agree on which
+fitted component is which true archetype).
+
+### Five-experiment simulation study
+
+`notebooks/simulation-study.ipynb` runs five experiments, each isolating one
+claim about MoLA's archetype recovery (each needs a different axis held fixed
+and a different axis varied, which is why they're separate rather than one
+combined sweep):
+
+0. **Simulation Setup** (not one of the five claims — validates the
+   *simulator*, not MoLA) — `plot_setup_diagnostics(data)` checks users per
+   archetype (vs. `pi`), responses per user, items per skill, skills per
+   item, Q-matrix column (skill) similarity, and archetype separation, all
+   from one `generate_dataset(...)` call.
+1. **Archetype Recovery** — does MoLA recover the generating structure at
+   all? `run_condition(..., return_fit=True)` + `plot_component_recovery`
+   for the per-archetype profile overlays, and `plot_parameter_recovery`
+   for the three true-vs-recovered scatters (archetype skill mastery `mu`,
+   item difficulty `1 - theta`, mixture weights `pi`) in one figure — items
+   have a fixed index, so no Hungarian alignment is needed for `theta`,
+   unlike `mu`/`pi`.
+2. **Estimation Stability** — two sub-questions. **(2a, exploratory, not
+   used in the paper)** does the *initialization scheme* matter?
+   `run_init_repeats` fixes one simulated dataset and its train/holdout
+   split, then re-fits it many times varying only the EM initialization
+   draw, comparing `initialization="random"` against `"k-means"` across a
+   few `data_seed`s -- see `src/mola`'s `init` docstring for why they land in
+   different places despite similar likelihood. **(2b, the headline result)**
+   given the assumed k-means-informed initialization, how much does the
+   recovered structure vary just from *which* sample was drawn?
+   `run_sample_repeats` draws ONE population once, then repeatedly redraws
+   only the sample (`resample_dataset`) and refits; the same
+   `plot_component_recovery_distribution` shows the spread across samples
+   rather than across EM-initialization draws (pass `repeat_label="samples"`
+   so panel titles say so).
+3. **Robustness to Data Sparsity** — does recovery degrade gracefully as
+   users (`n_learners`) or responses-per-user (`responses_per_learner`)
+   shrink? `ofat_design` + `run_design` + `plot_ofat_sensitivity`.
+4. **Sensitivity to the Number of Archetypes** — two parts. **(4a)** what
+   happens when the fitted `n_components` doesn't match the true
+   `n_archetypes`, at one illustrative condition? `run_m_sweep` fits the
+   same data across a grid of `n_components_fit` values; `plot_m_sensitivity`
+   also reports `MoLA.effective_n_archetypes()` per fit, which should
+   saturate near the true count even when over-specified. **(4b)** which of
+   four candidate signals -- predictive performance, parameter stability
+   across EM initializations, archetype separation, and whether extra
+   components carry meaningful population mass -- actually recovers the
+   true `M`? `run_m_selection_evaluation` sweeps true `n_archetypes` x
+   `archetype_separation`, derives seven concrete `M_hat` rules per
+   condition (`pick_m_by_criterion`, one or two per candidate signal, kept
+   separate rather than combined into one rule), and scores each against
+   the known truth; `plot_m_selection_recovery` shows recovered vs. true
+   `M` per criterion, faceted by separation level. Note `run_m_sweep`
+   itself now uses `condition.initialization` as given (default
+   `"k-means"`) rather than forcing `"random"` -- only `initialization=
+   "informed"` still requires the fitted and true archetype counts to
+   match, since `"k-means"` clusters into however many components it's
+   asked for regardless.
+5. **Computational Scalability** — how does fit time grow with problem size?
+   The same `ofat_design` + `run_design` machinery as (3), plotted with
+   `plot_ofat_sensitivity(..., metric="train_time_sec", log_x=True,
+   log_y=True, sharey=True, reference_line="linear")`.
+
+`plot_ofat_sensitivity` takes the **per-run** table from `run_design`
+directly, not `summarize_results`'s aggregated output (which drops the
+per-condition factor columns the sensitivity plot needs) — it computes the
+mean/std per factor level itself. Use `log_x` and `log_y` together (never
+`log_x` alone) when checking a scaling law like (5): on log-log axes a power
+law `y ~ x**p` is a straight line of slope `p`, so linear cost reads as a
+straight line. Plotted with a linear y-axis instead, genuinely linear cost
+bends upward and can look quadratic or exponential — a straight line under
+log-x/linear-y actually corresponds to *logarithmic* growth, not linear.
+`reference_line="linear"` draws that `p = 1` line explicitly (anchored at
+each panel's own smallest level, real-space `y = y[0] * (x / x[0])`, so it
+reads correctly under any consistent axis-scale choice) so a reader doesn't
+have to recognize "slope 1" themselves to see the data track it.
+`sharey=True` puts every panel on one common y-axis for direct cross-factor
+magnitude comparison — safe under `log_y=True` specifically (equal *ratios*
+get equal visual spacing regardless of a panel's own range), where it would
+risk visually flattening a narrower-range panel under a *linear* shared
+axis.
+
+`src/simulations/dgp.py`'s `q_matrix` self-balances item coverage across
+skills — closing a real confound found in the Estimation Stability figure
+(a running-count-weighted draw, not the old fixed per-skill probability,
+which only matched "balanced" coverage in expectation and left real
+sampling noise, e.g. a 2-to-12 item range over 20 skills at typical scale).
+`q_matrix` also guarantees no two skill columns are identical (resampling
+if they are), closing a gap where nothing previously checked Q-matrix
+identifiability. Archetype membership (`z`) is deliberately **not** given
+the same treatment — it stays a plain draw from `pi`, with ordinary
+sampling noise, since a real cohort of learners samples from the population
+at random rather than being recruited in exact quotas matched to an
+unobserved archetype; forcing exact proportions there would remove a
+genuine source of estimation difficulty rather than an artifact of the
+simulator. Q-matrix coverage is a test-design choice (something a real
+test-maker controls); archetype population size is a sampling outcome
+(something no one controls) — the two aren't analogous.
+
+### Publication-quality figures
+
+`src/style.py` is a standalone module (no dependency on `src.mola` or
+`src.simulations`) for figures headed into a LaTeX paper: print-legible
+fonts/line weights, vector-safe embedded text (`pdf.fonttype=42`, so text
+stays real/searchable rather than a bitmap), and no dependency on a local
+LaTeX toolchain (`text.usetex` stays `False`; a Times-like serif font plus
+Matplotlib's `dejavuserif` mathtext set gets visually close to real LaTeX
+text without it). Deliberately avoids Matplotlib's `"cmr10"`/`"Computer
+Modern Roman"` font names in the serif fallback list — those are internal
+mathtext-only assets, and using them as the plain-text body font drops
+ordinary glyphs like the literal underscore (`"n_learners"` renders as
+`"n˙learners"`).
+
+```python
+from src.style import apply, figsize
+
+apply()  # every figure created for the rest of the session picks this up
+fig = plot_component_recovery(result, figsize=figsize("acm-sigconf-text", aspect=0.32))
+fig.savefig("figures/component_recovery.pdf")
+```
+
+`figsize(width, fraction=1.0, aspect=0.68)` sizes a figure in inches to
+exactly fill a fraction of a LaTeX column/text width, so `\includegraphics`
+doesn't rescale it (rescaling blurs text and distorts line weights relative
+to the surrounding body text). `width` is a raw point value or a key into
+`COLUMN_WIDTHS_PT` (a few common document classes, defaulting to
+`acmart`'s `sigconf` layout); get the exact number for your own document
+with `\typeout{\the\columnwidth}` (or `\the\textwidth`) next to a figure and
+reading it from the compiled `.log`. Use `publication_style()` as a context
+manager instead of `apply()` to scope the styling to only some figures in a
+session, and `strip_titles(fig)` to drop the descriptive `fig.suptitle(...)`
+some `viz.py` plots add (a submission figure's caption lives in the LaTeX
+source, not baked into the image).
+
+`notebooks/simulation-study.ipynb` applies this to all five experiment
+figures.
+
+`plot_ofat_sensitivity` and `plot_m_sensitivity` also never show a raw
+`snake_case` column name: `src.simulations.viz.METRIC_LABELS` maps known
+metric/factor names to readable labels (e.g. `mu_rmse` -> "Archetype
+Recovery RMSE", `n_learners` -> "Number of Learners"). Pass
+`labels={"mu_rmse": "..."}` to override or extend it for one figure;
+anything not listed falls back to `src.style.humanize_label`'s generic
+`snake_case` -> `Title Case` conversion (keeping a few statistical acronyms
+like AUC/RMSE upper-case) rather than showing the raw name.
 
 ## Tests
 
@@ -128,11 +294,28 @@ Also available: `plot_components(mu, ...)` for a single set of profiles, and
 pytest tests/ -q
 ```
 
-`tests/test_mola.py` covers the `MoLA` model itself: construction, the EM loop
+`tests/test_mola.py` covers the `MoLA` model itself: construction, both
+initialization schemes (`"k-means"` needs `X`, `"random"` doesn't; each is
+deterministic given `random_state` and independent of the other), the EM loop
 (parameter ranges, seed determinism, monotonic convergence), the
 stability/stopping checks, and the posterior, predictive and
 psi/difficulty/redundancy read-outs, all on a tiny fit.
-`tests/test_simulations.py` covers the design grid, the data-generating process,
-`run_condition` / `run_design` / `summarize_results`, and the CLI wiring, all on a
+`tests/test_simulations.py` covers the design grid, the data-generating
+process (including `q_matrix`'s column-distinctness/balance guarantees and
+`resample_dataset`'s population-fixed/sample-varying contract),
+`run_condition` / `run_design` / `summarize_results` / `run_init_repeats` /
+`run_sample_repeats` / `run_m_sweep` / `run_m_sweep_with_repeats`, the
+`n_components_fit` misspecification validation (only `"informed"` still
+raises; `"k-means"` now works at any `n_components_fit`), the M-selection
+evaluation (`default_m_grid`, `summarize_m_sweep`, `pick_m_by_criterion`,
+`run_m_selection_evaluation`), and the CLI wiring, all on a
 tiny simulation condition so the suite finishes in a few seconds.
-`tests/test_viz.py` covers the component-recovery plots (headless, Agg backend).
+`tests/test_viz.py` covers the component-recovery plots and the five-experiment
+study's plots (`plot_component_recovery_distribution`, `plot_ofat_sensitivity`,
+`plot_m_sensitivity`, `plot_m_selection_recovery`, `plot_setup_diagnostics`,
+`plot_theta_recovery` (both the default difficulty view and the `difficulty=
+False` easiness opt-out), `plot_parameter_recovery` (including that its `pi`
+panel follows `mu`'s Hungarian alignment, not naive index order)), headless
+(Agg backend).
+`tests/test_style.py` covers `figsize`, `publication_style` / `apply`, and
+`strip_titles`.

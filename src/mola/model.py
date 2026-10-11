@@ -10,7 +10,7 @@ from src.mola.train import _MoLABase
 
 class MoLA(_MoLABase):
     """
-    MoLA with item difficulty (Lentini 2025).
+    MoLA with item difficulty.
 
     Theta is related to difficulty by the following relationship:
         theta = (1 - d_j)^{n_j}
