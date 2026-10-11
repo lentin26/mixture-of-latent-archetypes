@@ -19,3 +19,9 @@ data/
 # Paper drafts -- the manuscript itself lives outside this repo; these are
 # working LaTeX fragments/trackers, not a tracked artifact of the codebase.
 paper/
+
+# Superseded exploratory notebooks (old Pearson Mastering-platform work,
+# predating the current EdNet-based high-dimensional experiment); kept
+# locally, untracked for the public repo.
+high-dimensional-experiment/
+low-dimensional-experiment/
