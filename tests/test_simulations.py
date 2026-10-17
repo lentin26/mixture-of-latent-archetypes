@@ -191,33 +191,31 @@ def test_misspecified_q_adds_a_column():
     assert mis.Q_fit.shape[1] == SMALL.n_skills + 1
 
 
-def test_q_matrix_columns_are_always_distinct():
-    # a handful of seeds and both coverage modes -- a property test, not just one example
-    for seed in range(5):
-        for coverage in ("balanced", "uneven"):
-            rng = np.random.default_rng(seed)
-            Q = q_matrix(n_items=40, n_skills=SMALL.n_skills, coverage=coverage, rng=rng)
-            assert np.unique(Q, axis=1).shape[1] == SMALL.n_skills
-
-
-def test_q_matrix_balances_coverage_far_better_than_unweighted_sampling():
-    rng_balanced = np.random.default_rng(0)
-    Q_balanced = q_matrix(n_items=60, n_skills=20, coverage="balanced", rng=rng_balanced)
-
-    rng_naive = np.random.default_rng(0)
-    Q_naive = q_matrix(n_items=60, n_skills=20, coverage="balanced", rng=rng_naive, balance_power=0.0)
-
-    cv_balanced = Q_balanced.sum(axis=0).std() / Q_balanced.sum(axis=0).mean()
-    cv_naive = Q_naive.sum(axis=0).std() / Q_naive.sum(axis=0).mean()
-    assert cv_balanced < cv_naive / 2  # substantially tighter, not just marginally
-
-
-def test_q_matrix_raises_when_distinct_columns_are_structurally_impossible():
-    # skills_per_item=(2, 2) with n_skills=2 forces every item to carry both
-    # skills, so every column is identical no matter how many times we resample.
+def test_q_matrix_guarantees_every_skill_a_dedicated_pure_item():
+    # The identity-submatrix construction (Chen, Liu, Xu & Ying 2015; Gu & Xu
+    # 2021) guarantees every skill has >=1 item requiring only that skill.
     rng = np.random.default_rng(0)
-    with pytest.raises(RuntimeError, match="distinct skill columns"):
-        q_matrix(n_items=2, n_skills=2, coverage="balanced", rng=rng, skills_per_item=(2, 2), max_resample=5)
+    Q = q_matrix(n_items=60, n_skills=20, rng=rng)
+    pure_items = Q[Q.sum(axis=1) == 1]
+    skills_with_pure_item = set(np.argmax(pure_items, axis=1).tolist())
+    assert skills_with_pure_item == set(range(20))
+
+
+def test_q_matrix_columns_are_always_distinct():
+    # The identity block makes column collisions structurally impossible, so
+    # this should hold even in the smallest case (n_items == n_skills) and
+    # even with skills_per_item forced to its max, across several seeds --
+    # a property test, not just one example.
+    for seed in range(5):
+        rng = np.random.default_rng(seed)
+        Q = q_matrix(n_items=2, n_skills=2, rng=rng, skills_per_item=(2, 2))
+        assert np.unique(Q, axis=1).shape[1] == 2
+
+
+def test_q_matrix_raises_when_fewer_items_than_skills():
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="n_items"):
+        q_matrix(n_items=5, n_skills=20, rng=rng)
 
 
 # --------------------------------------------------------------------------- #

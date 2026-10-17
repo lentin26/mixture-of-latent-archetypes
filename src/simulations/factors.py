@@ -53,7 +53,7 @@ class SimulationCondition:
     """One cell of the simulation design."""
 
     n_archetypes: int = 4
-    n_learners: int = 2_000
+    n_learners: int = 10_000
     responses_per_learner: int = 30
     archetype_separation: Separation = "medium"
     archetype_imbalance: Imbalance = "balanced"
