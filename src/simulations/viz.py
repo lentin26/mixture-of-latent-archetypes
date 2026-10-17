@@ -27,6 +27,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MaxNLocator
 
 from src.simulations.dgp import SimulatedDataset
 from src.simulations.factors import (
@@ -1691,26 +1692,39 @@ def plot_setup_diagnostics(
     expected = data.pi.ravel() * len(data.z)
     ax.bar(np.arange(n_archetypes), counts, color="#1f77b4", alpha=0.8, label="realized")
     ax.scatter(np.arange(n_archetypes), expected, color="#d62728", marker="_", s=400,
-               linewidths=2, label="expected (pi * n_learners)", zorder=3)
-    ax.set_xlabel("archetype")
-    ax.set_ylabel("number of learners")
+               linewidths=2, label=r"expected ($\pi_m N$)", zorder=3)
+    ax.set_xticks(np.arange(n_archetypes))
+    ax.set_xlabel("Archetype")
+    ax.set_ylabel("Number of learners")
     ax.set_title("Users per archetype", fontsize=9)
     ax.legend(fontsize=7)
 
     # 2. responses per user
     ax = flat[1]
     responses_per_user = (~np.isnan(data.X)).sum(axis=1)
-    ax.hist(responses_per_user, bins=min(20, len(np.unique(responses_per_user))), color="#1f77b4")
-    ax.set_xlabel("responses per learner")
-    ax.set_ylabel("number of learners")
-    ax.set_title("Responses per user", fontsize=9)
+    unique_counts = np.unique(responses_per_user)
+    if len(unique_counts) == 1:
+        # Constant across learners (e.g. iid sampling): a histogram would
+        # falsely suggest a spread, so draw a single bar at the fixed value
+        # instead and state it directly in the title.
+        fixed_value = int(unique_counts[0])
+        ax.bar([fixed_value], [len(responses_per_user)], width=0.6, color="#1f77b4")
+        ax.set_xlim(fixed_value - 1, fixed_value + 1)
+        ax.set_xticks([fixed_value])
+        ax.set_title(f"Responses per user\nconstant at {fixed_value}", fontsize=9)
+    else:
+        ax.hist(responses_per_user, bins=min(20, len(unique_counts)), color="#1f77b4")
+        ax.set_title("Responses per user", fontsize=9)
+    ax.set_xlabel("Responses per learner")
+    ax.set_ylabel("Number of learners")
 
     # 3. items per skill
     ax = flat[2]
     items_per_skill = np.asarray(data.Q.sum(axis=0)).ravel()
     ax.bar(np.arange(len(items_per_skill)), items_per_skill, color="#1f77b4")
-    ax.set_xlabel("skill index")
-    ax.set_ylabel("number of items")
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel("Skill index")
+    ax.set_ylabel("Number of items")
     ax.set_title("Items per skill", fontsize=9)
 
     # 4. skills per item
@@ -1718,16 +1732,16 @@ def plot_setup_diagnostics(
     skills_per_item = np.asarray(data.Q.sum(axis=1)).ravel()
     bins = np.arange(skills_per_item.min(), skills_per_item.max() + 2) - 0.5
     ax.hist(skills_per_item, bins=bins, color="#1f77b4", rwidth=0.8)
-    ax.set_xlabel("skills required")
-    ax.set_ylabel("number of items")
+    ax.set_xlabel("Skills required")
+    ax.set_ylabel("Number of items")
     ax.set_title("Skills per item", fontsize=9)
 
     # 5. Q-matrix column (skill) similarity
     ax = flat[4]
     similarities = _pairwise_jaccard(data.Q)
     ax.hist(similarities, bins=20, range=(0, 1), color="#1f77b4")
-    ax.set_xlabel("pairwise Jaccard similarity")
-    ax.set_ylabel("number of skill pairs")
+    ax.set_xlabel("Pairwise Jaccard similarity")
+    ax.set_ylabel("Number of skill pairs")
     ax.set_title(f"Q-matrix column similarity\nmax={similarities.max():.2f}", fontsize=9)
 
     # 6. archetype separation
