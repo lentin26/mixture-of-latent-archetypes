@@ -1571,7 +1571,8 @@ def plot_m_sensitivity(
             y = [r.model.effective_n_archetypes() for r in results]
         else:
             y = [r.metrics[metric] for r in results]
-        ax.plot(m_values, y, marker="o", color="#1f77b4")
+        ax.plot(m_values, y, marker="o", color="#1f77b4",
+                markeredgecolor="black", markeredgewidth=0.8)
         _mark_reference_level(ax, true_n_archetypes)
         ax.set_xlabel(humanize_label("n_components_fit", label_map))
         ax.set_ylabel(humanize_label(metric, label_map))
@@ -1579,7 +1580,6 @@ def plot_m_sensitivity(
         ax.grid(alpha=0.3, linewidth=0.6)
     for j in range(len(metrics), len(flat)):
         flat[j].set_visible(False)
-    fig.suptitle("Sensitivity to the number of archetypes", fontsize=12)
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)
