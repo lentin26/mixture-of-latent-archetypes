@@ -50,7 +50,16 @@ def archetype_means(
     separation: str,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Place archetypes in [0, 1]^K with controlled pairwise separation."""
+    """Place archetypes in [0, 1]^K with controlled pairwise separation.
+
+    The K skills are partitioned, in index order, into M contiguous groups
+    (one per archetype) -- an arbitrary but fixed partition, the same for
+    every replicate at a given (K, M), since skill indices carry no
+    inherent meaning for this to depend on. Archetype m's own group sits
+    at 0.5 + delta; every other skill sits at 0.5 - delta. `separation`
+    controls only the magnitude of this gap (delta), not which skills are
+    "up" vs. "down" for a given archetype.
+    """
     delta = SEPARATION_DELTA[separation]
     mu = np.full((n_archetypes, n_skills), 0.5)
     if n_skills >= n_archetypes:
@@ -58,10 +67,6 @@ def archetype_means(
         for m, skills in enumerate(groups):
             mu[m] = 0.5 - delta
             mu[m, skills] = 0.5 + delta
-            if separation != "high":
-                n_extra = max(1, n_skills // (4 * n_archetypes))
-                extra = rng.choice(n_skills, size=min(n_extra, n_skills), replace=False)
-                mu[m, extra] = 0.5 + 0.5 * delta
     else:
         raw = rng.normal(size=(n_archetypes, n_skills))
         high = raw > np.median(raw, axis=1, keepdims=True)
