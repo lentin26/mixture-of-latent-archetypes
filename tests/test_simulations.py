@@ -492,6 +492,43 @@ def test_kmeans_init_works_with_misspecified_n_components_fit():
     assert result.model.mu.shape[0] == SMALL.n_archetypes + 1
 
 
+def test_kmeans_init_pi_is_valid_when_a_cluster_is_left_empty(monkeypatch):
+    """Regression test, mirroring tests/test_mola.py's identically-named
+    check on src.mola.MoLA's own (separately implemented) k-means init: if
+    the final k-means labeling skips a cluster index -- in principle
+    possible on sufficiently degenerate data, though confirmed unreachable
+    across the full OFAT grid plus real fraction-subtraction and EdNet data,
+    since sklearn's own empty-cluster relocation makes it rare in practice
+    -- `pi` must still sum to 1, with each share attributed to its actual
+    cluster label rather than written into the wrong position by raw count
+    order.
+    """
+    import sklearn.cluster
+
+    from src.simulations.run import _kmeans_init
+
+    n_components = 3
+    n = 150
+    # Skip cluster label 1 entirely; split the rest evenly between 0 and 2.
+    fake_labels = np.where(np.arange(n) % 2 == 0, 0, 2)
+
+    def fake_fit_predict(self, X):
+        self.cluster_centers_ = np.full((self.n_clusters, X.shape[1]), 0.5)
+        return fake_labels
+
+    monkeypatch.setattr(sklearn.cluster.KMeans, "fit_predict", fake_fit_predict)
+
+    cond = SimulationCondition(**{**SMALL.__dict__, "n_archetypes": n_components, "n_learners": n})
+    data = generate_dataset(cond, seed=0)
+    rng = np.random.default_rng(0)
+    _, _, pi = _kmeans_init(data.X, data.Q_fit, n_components, rng)
+
+    assert pi.sum() == pytest.approx(1.0)
+    # Clusters 0 and 2 (equal counts) each get 0.5/(4/3) = 0.375; cluster 1
+    # (never observed) keeps the 1/3 fallback, rescaled to 0.25.
+    np.testing.assert_allclose(pi.ravel(), [0.375, 0.25, 0.375], rtol=1e-10)
+
+
 def test_run_init_repeats_holds_data_fixed_and_varies_only_init():
     random_only = SimulationCondition(**{**SMALL.__dict__, "initialization": "random"})
     results = run_init_repeats(random_only, data_seed=0, n_repeats=4)

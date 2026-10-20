@@ -101,9 +101,18 @@ def _kmeans_init(
     )
     labels = km.fit_predict(scores)
     mu = np.clip(km.cluster_centers_, 0.05, 0.95)
-    _, counts = np.unique(labels, return_counts=True)
+    unique_labels, counts = np.unique(labels, return_counts=True)
     pi = np.full(n_components, 1.0 / n_components)
-    pi[: counts.size] = counts / counts.sum()
+    # Indexed by the actual cluster labels present, not by position -- a
+    # cluster missing from `labels` (possible in principle if KMeans, which
+    # normally relocates empty clusters during fitting, still ends up with
+    # one for sufficiently degenerate data) would otherwise have a later
+    # cluster's count written into its slot. The final renormalization folds
+    # any leftover 1/n_components fallback mass for an unseen cluster back
+    # into a valid distribution, since `counts.sum()` alone only accounts
+    # for the clusters that were actually observed.
+    pi[unique_labels] = counts / counts.sum()
+    pi = pi / pi.sum()
     mask = ~np.isnan(X)
     item_mean = np.nanmean(X, axis=0, keepdims=True).T
     # 0.5: maximum-entropy fallback for an item with no observed responses at all.

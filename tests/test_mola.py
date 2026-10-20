@@ -190,6 +190,42 @@ def test_kmeans_init_depends_on_the_data(toy):
     assert not np.allclose(a.theta, b.theta)
 
 
+def test_kmeans_init_pi_is_valid_when_a_cluster_is_left_empty(toy, monkeypatch):
+    """Regression test: if k-means' final labeling skips a cluster index (in
+    principle possible on sufficiently degenerate data, though sklearn's own
+    empty-cluster relocation makes it rare in practice -- confirmed
+    unreachable across the full OFAT grid plus real fraction-subtraction and
+    EdNet data), `pi` must still be a valid, correctly aligned distribution:
+    sum to 1, with each entry attributed to its actual cluster label rather
+    than written into the wrong position by raw count order.
+    """
+    import sklearn.cluster
+
+    model = _make_model(toy)
+    n = toy["X"].shape[0]
+    # N_COMPONENTS == 3; skip cluster label 1 entirely, mimicking what
+    # np.unique(labels) sees when a cluster ends up with zero points.
+    fake_labels = np.where(np.arange(n) % 2 == 0, 0, 2)
+
+    def fake_fit_predict(self, X):
+        # fit_predict normally sets cluster_centers_ as a side effect;
+        # _kmeans_init reads it afterward, so stub a valid-shaped array.
+        self.cluster_centers_ = np.full((self.n_clusters, X.shape[1]), 0.5)
+        return fake_labels
+
+    monkeypatch.setattr(sklearn.cluster.KMeans, "fit_predict", fake_fit_predict)
+    model._init_fit(model._prepare_X(toy["X"]))
+
+    # Pre-fix: pi[:2] would be overwritten with clusters 0 and 2's counts
+    # (misaligned -- cluster 2's share landing in slot 1), and pi[2] would
+    # keep the untouched 1/3 fallback, summing to 4/3 overall. Correctly
+    # aligned and renormalized: clusters 0 and 2 (equal counts) each get
+    # 0.5/(4/3) = 0.375; cluster 1 (never observed) keeps the fallback
+    # 1/3, rescaled by the same factor to 0.25. Sums to 1 exactly.
+    assert model.pi.sum() == pytest.approx(1.0)
+    np.testing.assert_allclose(model.pi.ravel(), [0.375, 0.25, 0.375], rtol=1e-10)
+
+
 # --------------------------------------------------------------------------- #
 # X transforms
 # --------------------------------------------------------------------------- #

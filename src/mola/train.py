@@ -211,9 +211,14 @@ class _MoLABase:
         labels = km.fit_predict(scores)
         mu = np.clip(km.cluster_centers_, 0.05, 0.95)
 
-        _, counts = np.unique(labels, return_counts=True)
+        unique_labels, counts = np.unique(labels, return_counts=True)
         pi = np.full(n_components, 1.0 / n_components)
-        pi[: counts.size] = counts / counts.sum()
+        # See src.simulations.run._kmeans_init's matching comment: indexed by
+        # the actual cluster labels present (not by position), and
+        # renormalized afterward so an unseen cluster's leftover fallback
+        # mass doesn't push the total above 1.
+        pi[unique_labels] = counts / counts.sum()
+        pi = pi / pi.sum()
 
         return mu, theta, pi.reshape(-1, 1)
 
