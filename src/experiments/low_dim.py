@@ -150,6 +150,59 @@ def select_mola_m(X_train, Q_matrix, m_grid, m_select_frac=0.2, seed=0, **mola_k
     return best_m, nll_by_m
 
 
+def archetype_assignment_confidence(X, Q_matrix, n_components=5, **mola_kwargs):
+    """How decisively the fitted model assigns learners to archetypes.
+
+    The translation indeterminacy leaves the posterior responsibilities
+    untouched, so the partition of learners into archetypes is identified
+    without anchor items while the archetypes' absolute attribute levels are
+    not. That makes the partition the part of the output least dependent on an
+    identifying convention -- but only worth reading if the model actually
+    commits to an assignment, which this measures.
+
+    Confidence is necessary, not sufficient: a model can be sure of a partition
+    that does not correspond to anything. The simulated counterpart in
+    ``src.experiments.anchoring`` reports this alongside the adjusted Rand
+    index against known labels, where the two track each other across
+    separation levels.
+
+    Defaults match the qualitative analysis's configuration, so the returned
+    statistics describe the same fit as its archetype table.
+    """
+    params = {
+        "Q": Q_matrix,
+        "n_components": n_components,
+        "mu_prior": (2, 2),
+        "theta_prior": (2, 2),
+        "pi_prior": 1,
+        "tol": 1e-5,
+        "max_iter": 50,
+        "pseudo_likelihood": False,
+        "init": "k-means",
+    }
+    params.update(mola_kwargs)
+
+    model = MoLA(**params)
+    model.fit(X)
+    post = np.asarray(model.predict_proba(X))
+    top = post.max(axis=1)
+    entropy = -(post * np.log(np.clip(post, 1e-300, None))).sum(axis=1)
+
+    return {
+        "n_learners": int(post.shape[0]),
+        "n_components": int(post.shape[1]),
+        "mean_max_gamma": float(top.mean()),
+        "median_max_gamma": float(np.median(top)),
+        "min_max_gamma": float(top.min()),
+        "share_above": {t: float((top > t).mean()) for t in (0.5, 0.8, 0.9, 0.95, 0.99)},
+        "mean_entropy": float(entropy.mean()),
+        "uniform_entropy": float(np.log(post.shape[1])),
+        "hard_assignment_counts": np.bincount(
+            post.argmax(axis=1), minlength=post.shape[1]
+        ).tolist(),
+    }
+
+
 def fit_mola(splits, Q_df, m_grid=None):
     """Fits MoLA on every split. `m_grid`, if given, selects `M` per
     split via `select_mola_m` (held-out predictive log-likelihood on a
