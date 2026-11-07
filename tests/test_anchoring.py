@@ -4,8 +4,8 @@ Run from the repo root:
 
     pytest tests/test_anchoring.py -q
 
-Two things here are load-bearing. First, ``AnchoredMoLA`` has to actually hold
-the anchored difficulties fixed -- a clamp that silently stopped working would
+Two things here are load-bearing. First, ``MoLA``'s anchoring has to actually
+hold the anchored difficulties fixed -- a clamp that silently stopped working would
 leave every "anchored" result identical to the unanchored one, and the
 experiment would report that anchoring does nothing. Second, the oracle
 translation removal has to recover a *planted* translation, since the sign
@@ -20,12 +20,13 @@ import numpy as np
 import pytest
 
 from src.experiments.anchoring import (
-    AnchoredMoLA,
+    ANCHOR_LEVELS,
     anchor_items_for,
     between_archetype_agreement,
     remove_translation,
     within_archetype_auc,
 )
+from src.mola import MoLA
 from src.simulations.dgp import generate_dataset
 from src.simulations.factors import BASELINE
 
@@ -80,7 +81,7 @@ def test_unknown_level_is_rejected(data):
 def test_anchored_difficulties_are_held_exactly_fixed(data):
     items = anchor_items_for(data.Q_fit, "full", np.random.default_rng(0))
     target = data.theta.ravel()[items]
-    model = AnchoredMoLA(
+    model = MoLA(
         Q=data.Q_fit,
         n_components=BASELINE.n_archetypes,
         max_iter=10,
@@ -96,7 +97,7 @@ def test_the_clamp_pins_only_the_anchors(data):
     difficulty vector would make the comparison meaningless, and it would look
     like anchoring works perfectly."""
     items = anchor_items_for(data.Q_fit, "partial", np.random.default_rng(0))
-    model = AnchoredMoLA(
+    model = MoLA(
         Q=data.Q_fit,
         n_components=BASELINE.n_archetypes,
         max_iter=10,
@@ -116,7 +117,7 @@ def test_anchoring_reduces_the_fitted_translation(data):
     spreads = {}
     for level in ("none", "full"):
         items = anchor_items_for(data.Q_fit, level, np.random.default_rng(0))
-        model = AnchoredMoLA(
+        model = MoLA(
             Q=data.Q_fit,
             n_components=BASELINE.n_archetypes,
             max_iter=BASELINE.n_iter,
@@ -133,20 +134,84 @@ def test_anchoring_reduces_the_fitted_translation(data):
 
 def test_anchor_arguments_must_be_paired(data):
     with pytest.raises(ValueError, match="together"):
-        AnchoredMoLA(Q=data.Q_fit, n_components=2, anchor_items=[0, 1])
+        MoLA(Q=data.Q_fit, n_components=2, anchor_items=[0, 1])
+    with pytest.raises(ValueError, match="together"):
+        MoLA(Q=data.Q_fit, n_components=2, anchor_easiness=[0.5, 0.5])
 
 
-def test_unanchored_subclass_matches_the_base_model(data):
-    """With no anchors, the subclass must be a no-op relative to MoLA itself."""
-    from src.mola import MoLA
+@pytest.mark.parametrize(
+    "items, easiness, match",
+    [
+        ([0, 1], [0.5], "same length"),
+        ([0, 0], [0.5, 0.5], "must not repeat"),
+        ([-1], [0.5], "non-negative"),
+        ([0], [0.0], r"\(0, 1\)"),
+        ([0], [1.0], r"\(0, 1\)"),
+        ([0], [1.5], r"\(0, 1\)"),
+    ],
+)
+def test_malformed_anchors_are_rejected(data, items, easiness, match):
+    with pytest.raises(ValueError, match=match):
+        MoLA(Q=data.Q_fit, n_components=2, anchor_items=items, anchor_easiness=easiness)
 
+
+def test_empty_anchor_arrays_mean_no_anchors(data):
+    model = MoLA(Q=data.Q_fit, n_components=2, anchor_items=[], anchor_easiness=[])
+    assert model.anchor_items is None and model.anchor_easiness is None
+
+
+def test_out_of_range_anchor_index_is_caught_at_fit(data):
+    """Bounds cannot be checked at construction, since Q may be supplied later."""
+    n_items = data.Q_fit.shape[0]
+    model = MoLA(
+        Q=data.Q_fit,
+        n_components=2,
+        max_iter=1,
+        anchor_items=[n_items + 5],
+        anchor_easiness=[0.5],
+    )
+    with pytest.raises(ValueError, match="only .* items"):
+        model.fit(data.X)
+
+
+def test_anchor_rank_distinguishes_the_levels(data):
+    n_skills = data.Q_fit.shape[1]
+    rng = np.random.default_rng(0)
+    ranks = {}
+    for level in ANCHOR_LEVELS:
+        items = anchor_items_for(data.Q_fit, level, rng)
+        model = MoLA(
+            Q=data.Q_fit,
+            n_components=2,
+            anchor_items=items,
+            anchor_easiness=None if items is None else data.theta.ravel()[items],
+        )
+        ranks[level] = model._anchor_rank()
+    assert ranks == {"none": 0, "partial": n_skills // 2, "full": n_skills}
+
+
+def test_anchored_difficulties_are_not_counted_as_free_parameters(data):
+    items = anchor_items_for(data.Q_fit, "full", np.random.default_rng(0))
+    kwargs = dict(Q=data.Q_fit, n_components=BASELINE.n_archetypes, max_iter=1)
+    free = MoLA(**kwargs)
+    free.fit(data.X)
+    anchored = MoLA(
+        **kwargs, anchor_items=items, anchor_easiness=data.theta.ravel()[items]
+    )
+    anchored.fit(data.X)
+    assert free.get_param_count() - anchored.get_param_count() == items.size
+
+
+def test_passing_no_anchors_changes_nothing(data):
+    """Explicitly passing no anchors must be identical to omitting them, so
+    the anchoring code path cannot perturb any existing result."""
     kwargs = dict(Q=data.Q_fit, n_components=BASELINE.n_archetypes, max_iter=5)
     base = MoLA(**kwargs)
     base.fit(data.X)
-    sub = AnchoredMoLA(**kwargs)
-    sub.fit(data.X)
-    np.testing.assert_allclose(sub.mu, base.mu, rtol=1e-10)
-    np.testing.assert_allclose(sub.theta, base.theta, rtol=1e-10)
+    explicit = MoLA(**kwargs, anchor_items=None, anchor_easiness=None)
+    explicit.fit(data.X)
+    np.testing.assert_allclose(explicit.mu, base.mu, rtol=1e-10)
+    np.testing.assert_allclose(explicit.theta, base.theta, rtol=1e-10)
 
 
 # --------------------------------------------------------------------------- #

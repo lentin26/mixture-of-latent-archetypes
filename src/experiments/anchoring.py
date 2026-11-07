@@ -81,45 +81,6 @@ from src.simulations.metrics import align_components, assignment_ari, mu_rmse, t
 ANCHOR_LEVELS = ("none", "partial", "full")
 
 
-class AnchoredMoLA(MoLA):
-    """MoLA with the difficulties of a chosen item subset held fixed.
-
-    Clamping a subset of coordinates keeps the MM argument intact: the
-    anchored values are imposed before the first iteration, so the starting
-    point lies in the restricted (affine) set, and because the surrogate's
-    coordinate updates are separable, clamping some coordinates and taking the
-    exact maximizer in the rest *is* the restricted maximizer. Each step
-    therefore still cannot decrease the surrogate, and hence the likelihood.
-
-    ``anchor_easiness`` is on the model's own item parameterization, where
-    ``theta`` is item easiness -- the data-generating process's ``theta``
-    field, so the true values can be passed through directly.
-    """
-
-    def __init__(self, *args, anchor_items=None, anchor_easiness=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        if (anchor_items is None) != (anchor_easiness is None):
-            raise ValueError("pass anchor_items and anchor_easiness together, or neither")
-        self.anchor_items = None if anchor_items is None else np.asarray(anchor_items, dtype=int)
-        self.anchor_easiness = (
-            None if anchor_easiness is None else np.asarray(anchor_easiness, dtype=float).ravel()
-        )
-
-    def _clamp(self):
-        if self.anchor_items is not None and self.theta is not None:
-            self.theta[self.anchor_items, 0] = self.anchor_easiness
-
-    def _init_fit(self, *args, **kwargs):
-        out = super()._init_fit(*args, **kwargs)
-        self._clamp()
-        return out
-
-    def update_model_params(self, *args, **kwargs):
-        out = super().update_model_params(*args, **kwargs)
-        self._clamp()
-        return out
-
-
 def anchor_items_for(Q: np.ndarray, level: str, rng: np.random.Generator) -> np.ndarray | None:
     """Pure items giving ``rank(Q*_A) = K`` (``full``) or ``K // 2`` (``partial``).
 
@@ -252,8 +213,12 @@ def run_one(seed: int, condition=BASELINE) -> list[dict]:
 
     for level in ANCHOR_LEVELS:
         items = anchor_items_for(data.Q_fit, level, rng)
+        # The generating easiness is on the same scale as the model's own
+        # ``theta``, so the true values pass straight through. Using the true
+        # values is what makes this anchoring rather than a reparameterization:
+        # they are known independently of the responses being fit.
         easiness = None if items is None else data.theta.ravel()[items]
-        model = AnchoredMoLA(
+        model = MoLA(
             Q=data.Q_fit,
             n_components=condition.n_archetypes,
             max_iter=condition.n_iter,

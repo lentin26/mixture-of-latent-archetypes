@@ -35,6 +35,8 @@ class _MoLABase:
         random_state: int | None = 746,
         model: str = "MoLA-id",
         init: str = "k-means",
+        anchor_items=None,
+        anchor_easiness=None,
     ):
         """
         Parameters
@@ -81,6 +83,38 @@ class _MoLABase:
             (mu, theta) solutions fit the observed responses almost equally
             well, so an uninformative start has no way to prefer the
             higher-recovery basin the way a data-informed one does.
+        anchor_items : array of item indices, optional
+            Items whose difficulty is held fixed during estimation rather than
+            estimated, passed together with ``anchor_easiness``. Without them
+            the likelihood is invariant to a ``K``-dimensional translation of
+            the archetype log-odds against the item difficulties, so the
+            archetype profiles are identified only up to that translation and
+            their absolute level is set by whatever convention the priors
+            impose. Fixing difficulties for a set of items whose normalized
+            Q-matrix rows span ``R^K`` eliminates the translation outright; a
+            set spanning only an ``r``-dimensional subspace leaves a
+            ``(K - r)``-dimensional family of translations and so removes the
+            indeterminacy only partly.
+
+            A spanning set needs one item per skill when each anchor measures a
+            single skill, and otherwise enough multi-skill items for their
+            normalized rows to span; real Q-matrices often have too few
+            single-skill items for the first route (Tatsuoka's
+            fraction-subtraction Q-matrix has three, covering two distinct
+            skills), in which case multi-skill anchors are required.
+
+            Anchoring is only identification if the fixed values are known
+            independently of the responses being fit -- externally calibrated
+            item parameters, or the generating values in a simulation. Plugging
+            in difficulties estimated from the same responses picks a
+            convention, like the priors do, rather than pinning the scale to
+            anything external.
+        anchor_easiness : array of floats in (0, 1), optional
+            The fixed item easiness for each entry of ``anchor_items``, on the
+            same scale as the ``theta`` attribute. Note that ``theta`` is
+            easiness, so it relates to the difficulty ``b`` of the paper's
+            response function by ``b = -logit(theta)``; a *larger*
+            ``anchor_easiness`` is an *easier* item.
         """
         if model not in self._MODELS:
             raise ValueError(f"model must be one of {self._MODELS}, got {model!r}")
@@ -99,6 +133,9 @@ class _MoLABase:
         self.random_state = random_state
         self.model = model
         self.init = init
+        self.anchor_items, self.anchor_easiness = self._check_anchors(
+            anchor_items, anchor_easiness
+        )
 
         # convergence bookkeeping
         self.nll_trace = []
@@ -117,6 +154,72 @@ class _MoLABase:
     # ------------------------------------------------------------------ #
     # input normalization
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _check_anchors(items, easiness):
+        """Validate the anchor arguments, returning them as arrays or ``(None, None)``.
+
+        Index bounds are not checked here, since ``Q`` may still be ``None`` at
+        construction time; :meth:`_anchor_rank` checks them once ``Q`` is known.
+        """
+        if items is None and easiness is None:
+            return None, None
+        if (items is None) != (easiness is None):
+            raise ValueError(
+                "pass anchor_items and anchor_easiness together, or neither; "
+                f"got anchor_items={'None' if items is None else 'an array'} and "
+                f"anchor_easiness={'None' if easiness is None else 'an array'}"
+            )
+
+        items = np.asarray(items, dtype=int).ravel()
+        easiness = np.asarray(easiness, dtype=float).ravel()
+        if items.size != easiness.size:
+            raise ValueError(
+                f"anchor_items and anchor_easiness must have the same length; "
+                f"got {items.size} and {easiness.size}"
+            )
+        if items.size == 0:
+            return None, None
+        if np.unique(items).size != items.size:
+            raise ValueError("anchor_items must not repeat an item index")
+        if items.min() < 0:
+            raise ValueError("anchor_items must be non-negative item indices")
+        if not np.all((easiness > 0.0) & (easiness < 1.0)):
+            raise ValueError(
+                "anchor_easiness must lie strictly inside (0, 1), since the "
+                "response function needs logit(theta) to be finite"
+            )
+        return items, easiness
+
+    def _anchor_rank(self):
+        """Rank of the anchored rows of the normalized Q-matrix.
+
+        Equal to ``n_skills`` exactly when the anchors eliminate the
+        translation indeterminacy; a smaller value ``r`` leaves a
+        ``(n_skills - r)``-dimensional family of translations.
+        """
+        if self.anchor_items is None:
+            return 0
+        if self.anchor_items.max() >= self.Q.shape[0]:
+            raise ValueError(
+                f"anchor_items contains item index {self.anchor_items.max()}, but "
+                f"Q has only {self.Q.shape[0]} items"
+            )
+        return int(np.linalg.matrix_rank(np.asarray(self.Q[self.anchor_items].todense())))
+
+    def _apply_anchors(self):
+        """Hold the anchored difficulties at their fixed values.
+
+        Clamping a subset of coordinates keeps the MM ascent argument intact.
+        The anchored values are imposed before the first iteration, so the
+        starting point already lies in the restricted (affine) parameter set,
+        and because the surrogate's coordinate updates are separable, clamping
+        some coordinates and taking the exact maximizer in the rest *is* the
+        maximizer over that restricted set. Each step therefore still cannot
+        decrease the surrogate, and hence cannot decrease the likelihood.
+        """
+        if self.anchor_items is not None and self.theta is not None:
+            self.theta[self.anchor_items, 0] = self.anchor_easiness
+
     @staticmethod
     def _normalize_q(Q):
         """Return ``Q`` as a row-normalized CSR float matrix (rows sum to 1)."""
@@ -253,6 +356,13 @@ class _MoLABase:
             self.theta = self._init_theta(self.n_items)
             self.pi = self._init_pi(n_components)
 
+        # Impose the anchors before the first iteration, so that the starting
+        # point lies in the restricted parameter set the M-step maximizes over
+        # (see _apply_anchors). _anchor_rank also bounds-checks the indices
+        # here, where Q is finally known.
+        self._anchor_rank()
+        self._apply_anchors()
+
         # # Update aggregate parmams
         # self.update_ab_params()
 
@@ -274,11 +384,19 @@ class _MoLABase:
         }
     
     def get_param_count(self):
-        param_count = 0
+        """Number of free population parameters.
+
+        Anchored item difficulties are fixed inputs rather than estimated
+        quantities, so they are excluded. With no anchors -- the default --
+        this is unchanged.
+        """
         param_count = np.prod(self.mu.shape) \
             + np.prod(self.theta.shape) \
             + np.prod(self.pi.shape)
-        
+
+        if self.anchor_items is not None:
+            param_count -= self.anchor_items.size
+
         return param_count
     
     def get_model_size_in_mb(self):
@@ -675,6 +793,10 @@ class _MoLABase:
             # Re-compute item probabilities before difficulty update
             p_jm = self.compute_P_jm()
             self.theta = self.update_theta(p_jm, theta_j, I_jm, R_jm)
+
+        # Restore any anchored difficulties the update just moved. Applied on
+        # both the pseudo-likelihood and the EM/MM branch above.
+        self._apply_anchors()
 
         # append parameter to parameter trace
         if False:
