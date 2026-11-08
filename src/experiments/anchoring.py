@@ -195,18 +195,33 @@ def within_archetype_spearman(mu_true, mu_est, perm, own_group_only=False) -> fl
 
 
 def between_archetype_agreement(mu_true, mu_est, perm) -> tuple[float, float]:
-    """Correlation and sign agreement of ``eta_mk - eta_m'k``, over all
-    archetype pairs and attributes."""
-    eta_true, eta_est = _logit(mu_true), _logit(mu_est)
-    true_d, est_d = [], []
-    for i in range(len(perm)):
-        for j in range(i + 1, len(perm)):
-            true_d.append(eta_true[i] - eta_true[j])
-            est_d.append(eta_est[perm[i]] - eta_est[perm[j]])
-    true_d = np.concatenate(true_d)
-    est_d = np.concatenate(est_d)
-    r = float(pearsonr(true_d, est_d)[0])
-    sign = float(np.mean(np.sign(true_d) == np.sign(est_d)))
+    """How well the across-archetype comparisons on each attribute are recovered.
+
+    The translation adds one offset ``delta_k`` to every archetype's value on
+    attribute ``k``, so centering each attribute across archetypes removes it
+    exactly and leaves precisely the part the interpretation remark calls
+    invariant. Correlating the centered log-odds is therefore a direct measure
+    of that part, and needs no reference to the pairwise differences
+    ``eta_mk - eta_m'k`` the remark is stated in terms of -- the centered
+    values span the same information, with one value per ``(m, k)`` rather
+    than one per archetype pair.
+
+    Scored by Spearman over the ``M * K`` centered values, the same statistic
+    as ``within_archetype_spearman`` so the two columns mean the same kind of
+    thing. Ranking across attributes as well as archetypes pools comparisons
+    the remark states one attribute at a time; both are invariant once
+    centered, and pooling avoids ranking only ``M`` values per attribute,
+    which at the archetype counts used here would be too coarse to read.
+
+    Returns the rank correlation and the share of entries whose sign matches,
+    both over the centered values.
+    """
+    eta_true = _logit(mu_true)
+    eta_est = _logit(mu_est)[perm]
+    true_c = eta_true - eta_true.mean(axis=0, keepdims=True)
+    est_c = eta_est - eta_est.mean(axis=0, keepdims=True)
+    r = float(spearmanr(true_c.ravel(), est_c.ravel()).statistic)
+    sign = float(np.mean(np.sign(true_c) == np.sign(est_c)))
     return r, sign
 
 
