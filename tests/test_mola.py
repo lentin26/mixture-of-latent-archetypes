@@ -664,3 +664,26 @@ def test_get_prior_exp_skill_prof_is_weighted_mean_of_archetypes(fitted):
     assert prof.shape == (N_SKILLS,)
     np.testing.assert_allclose(prof, (fitted.pi.ravel() @ fitted.mu))
     assert np.all((prof >= 0.0) & (prof <= 1.0))
+
+
+def test_get_avg_nll_from_data_accepts_a_dense_nan_masked_matrix(fitted, toy):
+    """Missing responses are NaN in a dense matrix, which every other read-out
+    accepts. This one reached `create_X1_and_X2`'s dense branch, where
+    `X2 = 1 - X1` propagates NaN into the observation mask and the
+    log-likelihood comes back NaN."""
+    X = np.asarray(toy["X"], dtype=float).copy()
+    X[np.random.default_rng(0).random(X.shape) < 0.2] = np.nan
+
+    total_nll, n_obs = fitted.get_avg_nll_from_data(X)
+    assert np.isfinite(total_nll) and total_nll > 0
+    assert n_obs == int((~np.isnan(X)).sum())
+
+
+def test_get_avg_nll_from_data_is_unchanged_for_a_complete_matrix(fitted, toy):
+    """The fix normalizes the input; it must not move the answer for input
+    that already worked."""
+    X = np.asarray(toy["X"], dtype=float)
+    dense = fitted.get_avg_nll_from_data(X.copy())
+    sparse = fitted.get_avg_nll_from_data(fitted._to_sparse(X.copy()))
+    assert dense[1] == sparse[1]
+    np.testing.assert_allclose(dense[0], sparse[0], rtol=0, atol=1e-9)

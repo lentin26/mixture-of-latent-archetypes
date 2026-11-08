@@ -517,6 +517,16 @@ class _MoLABase:
                 self.stop = True
 
     def get_avg_nll_from_data(self, X):
+        # Normalize the input the way the other read-outs do. Without this, a
+        # dense array using NaN for missing responses reaches the dense branch
+        # of `create_X1_and_X2`, where `X2 = 1 - X1` turns each NaN into
+        # another NaN and the observation mask `X1 + X2` becomes NaN rather
+        # than 0; the log-likelihood then comes back NaN and trips the
+        # assertion in `get_log_likelihood`. The sparse path treats a missing
+        # response as not-stored and handles it correctly. A complete matrix
+        # is unaffected either way.
+        X = self._prepare_X(X)
+
         # X1 and X2 are item response and inverse item response datum
         X1, X2 = self.create_X1_and_X2(X)
 
