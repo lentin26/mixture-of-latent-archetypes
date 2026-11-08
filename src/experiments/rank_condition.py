@@ -96,7 +96,12 @@ def check_fraction_subtraction() -> dict:
         theta_prior=(2, 2),
         pi_prior=1,
         tol=1e-5,
-        max_iter=50,
+        # Above MoLA's default of 50, which binds here: at M=5 the EM loop
+        # needs 96 iterations to meet `tol`, and the archetype table reported
+        # in the qualitative analysis is only reproduced once it converges.
+        # Certifying the rank condition at a truncated fit would be
+        # certifying it at parameters the paper does not report.
+        max_iter=500,
         pseudo_likelihood=False,
         init="k-means",
     )

@@ -50,7 +50,12 @@ MOLA_KWARGS = {
     "theta_prior": (2, 2),
     "pi_prior": 2,
     "tol": 1e-5,
-    "max_iter": 50,
+    # Deliberately above MoLA's default of 50, which binds on this dataset:
+    # at M=5 the EM loop needs 96 iterations to meet `tol` and a cap of 50
+    # stops it well short, leaving a materially different fit. A cap this high
+    # never binds here, so `tol` alone decides when fitting stops and both
+    # arms of the comparison below are compared at convergence.
+    "max_iter": 500,
     "pseudo_likelihood": False,
 }
 

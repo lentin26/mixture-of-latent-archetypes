@@ -176,7 +176,10 @@ def archetype_assignment_confidence(X, Q_matrix, n_components=5, **mola_kwargs):
         "theta_prior": (2, 2),
         "pi_prior": 1,
         "tol": 1e-5,
-        "max_iter": 50,
+        # Above MoLA's default of 50, which binds on this dataset: at
+        # n_components=5 the EM loop needs 96 iterations to meet `tol`, and
+        # stopping at 50 reports responsibilities from an unconverged fit.
+        "max_iter": 500,
         "pseudo_likelihood": False,
         "init": "k-means",
     }
