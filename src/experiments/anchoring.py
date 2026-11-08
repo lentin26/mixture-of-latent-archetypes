@@ -45,13 +45,14 @@ aggregate:
     removes the fitted translation by least squares (reported as the
     ``ls_corrected`` row). Anchoring should reach comparable accuracy without
     needing the ground truth the oracle correction consumes.
-``within_auc``
-    Per archetype, how well the recovered profile separates the skills in that
-    archetype's own elevated-proficiency group from the rest, as an AUC over
-    the ``K`` attributes, averaged across archetypes. This is the
-    within-archetype, across-attribute comparison the remark says is not
-    identified, in the form a practitioner would use it: which skills is this
-    archetype strong on?
+``within_rho`` / ``within_rho_own``
+    Rank correlation between each archetype's true and recovered attribute
+    ordering, over all ``K`` attributes and over just its elevated stratum.
+    This is the within-archetype, across-attribute comparison the remark says
+    is not identified. ``within_auc`` measures only the coarse
+    own-group/other split and saturates at 1.0 under these generating
+    profiles, so it is reported for continuity but is not the quantity of
+    interest -- see its docstring.
 ``between_r`` / ``between_sign``
     Across all archetype pairs and attributes, the correlation and sign
     agreement between recovered and true ``eta_mk - eta_m'k``. The remark
@@ -70,7 +71,7 @@ from dataclasses import replace
 
 import numpy as np
 import pandas as pd
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import roc_auc_score
 
 from src.mola import MoLA
@@ -144,12 +145,15 @@ def within_archetype_auc(mu_true: np.ndarray, mu_est: np.ndarray, perm: np.ndarr
     """Mean AUC for separating each archetype's own elevated skills, from the
     recovered profile alone.
 
-    The generating profiles place each archetype's own skill group at
-    ``0.5 + delta`` and the rest at ``0.5 - delta``, so "own group" is read off
-    the true profile by thresholding at its midpoint. An archetype whose
-    recovered profile ranks its own skills above the others scores 1; one whose
-    attribute ordering has been scrambled by an attribute-specific offset
-    scores near 0.5.
+    Retained as a diagnostic, but it saturates and should not be read as
+    measuring whether the within-archetype ordering is recovered. The
+    generating profiles are bimodal: an archetype's own skill group sits at
+    ``0.5 + delta`` and the rest at ``0.5 - delta``, a gap of roughly 2.2 in
+    log-odds at medium separation, while the fitted translation's
+    non-uniform part spans well under half that. The coarse own-group/other
+    split therefore survives any translation these simulations produce, and
+    this statistic reads 1.0 whether or not the finer ordering survives with
+    it. Use ``within_archetype_spearman`` for that.
     """
     scores = []
     for m_true, m_est in enumerate(perm):
@@ -158,6 +162,35 @@ def within_archetype_auc(mu_true: np.ndarray, mu_est: np.ndarray, perm: np.ndarr
         if label.min() == label.max():
             continue
         scores.append(roc_auc_score(label, mu_est[m_est]))
+    return float(np.mean(scores)) if scores else float("nan")
+
+
+def within_archetype_spearman(mu_true, mu_est, perm, own_group_only=False) -> float:
+    """Rank correlation between each archetype's true and recovered attribute
+    ordering, averaged across archetypes.
+
+    This is the within-archetype, across-attribute comparison the
+    interpretation remark says the response distribution does not determine,
+    measured at a resolution that can see it -- unlike the AUC above, which the
+    generating profiles' bimodality pins at 1.0.
+
+    With ``own_group_only``, the correlation is taken over just the archetype's
+    elevated skills. That ordering is partly unrecoverable in principle rather
+    than only unidentified: the generating spread inside that stratum is 0.13
+    to 0.29 in log-odds, comparable to the per-entry estimation noise, so even
+    an exactly identified fit cannot rank near-tied attributes reliably.
+    """
+    scores = []
+    for m_true, m_est in enumerate(perm):
+        truth, est = mu_true[m_true], mu_est[m_est]
+        if own_group_only:
+            keep = truth > 0.5 * (truth.min() + truth.max())
+            if keep.sum() < 3:
+                continue
+            truth, est = truth[keep], est[keep]
+        rho = spearmanr(truth, est).statistic
+        if np.isfinite(rho):
+            scores.append(float(rho))
     return float(np.mean(scores)) if scores else float("nan")
 
 
@@ -184,6 +217,10 @@ def _evaluate(mu_true, theta_true, mu_est, theta_est, post, z_true):
         "mu_rmse": mu_rmse(mu_true, mu_est),
         "theta_rmse": theta_rmse(theta_true, theta_est),
         "within_auc": within_archetype_auc(mu_true, mu_est, perm),
+        "within_rho": within_archetype_spearman(mu_true, mu_est, perm),
+        "within_rho_own": within_archetype_spearman(
+            mu_true, mu_est, perm, own_group_only=True
+        ),
         "between_r": r,
         "between_sign": sign,
         "ari": assignment_ari(z_true, post, perm),
@@ -284,6 +321,8 @@ def main(argv=None) -> int:
     cols = [
         "mu_rmse",
         "theta_rmse",
+        "within_rho",
+        "within_rho_own",
         "within_auc",
         "between_r",
         "between_sign",
