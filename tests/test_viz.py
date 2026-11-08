@@ -20,6 +20,7 @@ from src.simulations.dgp import generate_dataset
 from src.simulations.factors import SimulationCondition, ofat_design
 from src.simulations.run import run_condition, run_design, run_init_repeats, run_m_sweep
 from src.simulations.viz import (
+    plot_component_recovery_variants,
     CRITERION_LABELS,
     METRIC_LABELS,
     align_recovered_components,
@@ -983,3 +984,57 @@ def test_parameter_recovery_from_arrays_pi_panel_uses_mu_alignment():
 def test_parameter_recovery_requires_result_or_mu_arrays():
     with pytest.raises(ValueError):
         plot_parameter_recovery()
+
+
+# --------------------------------------------------------------------------- #
+# plot_component_recovery_variants
+# --------------------------------------------------------------------------- #
+
+def _variant_inputs(n_components=3, n_skills=6, seed=0):
+    rng = np.random.default_rng(seed)
+    mu_true = rng.uniform(0.15, 0.85, size=(n_components, n_skills))
+    shifted = np.clip(mu_true + 0.1, 0.01, 0.99)
+    return mu_true, {"Unanchored": shifted, "Anchored": mu_true}
+
+
+def test_variants_grid_is_rows_by_variant_and_columns_by_archetype():
+    mu_true, variants = _variant_inputs()
+    fig = plot_component_recovery_variants(mu_true, variants)
+    assert len(fig.axes) == len(variants) * mu_true.shape[0]
+    plt.close(fig)
+
+
+def test_variants_rows_are_aligned_independently():
+    """Each row gets its own Hungarian match, since the label permutation of
+    one fit says nothing about another's."""
+    mu_true, variants = _variant_inputs()
+    permuted = variants["Anchored"][::-1]
+    fig = plot_component_recovery_variants(mu_true, {"a": variants["Anchored"], "b": permuted})
+    # Both rows should draw the same assumed/recovered pairs despite the
+    # reversed row order in the second variant.
+    row0 = [ln.get_ydata() for ln in fig.axes[0].lines]
+    row1 = [ln.get_ydata() for ln in fig.axes[mu_true.shape[0]].lines]
+    for a, b in zip(row0, row1):
+        np.testing.assert_allclose(a, b)
+    plt.close(fig)
+
+
+def test_variants_row_notes_appear_in_the_left_axis_label():
+    mu_true, variants = _variant_inputs()
+    fig = plot_component_recovery_variants(
+        mu_true, variants, row_notes={"Unanchored": "RMSE 0.141"}
+    )
+    assert "RMSE 0.141" in fig.axes[0].get_ylabel()
+    plt.close(fig)
+
+
+def test_variants_requires_at_least_one_set():
+    mu_true, _ = _variant_inputs()
+    with pytest.raises(ValueError, match="at least one"):
+        plot_component_recovery_variants(mu_true, {})
+
+
+def test_variants_rejects_more_archetypes_than_columns():
+    mu_true, variants = _variant_inputs(n_components=5)
+    with pytest.raises(ValueError, match="max_cols"):
+        plot_component_recovery_variants(mu_true, variants, max_cols=4)
