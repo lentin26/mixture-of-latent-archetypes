@@ -43,6 +43,56 @@ FRAC_SUBTR_M = 5
 EDNET_SCALE_POINTS = {200: 16, 2000: 16}
 
 
+def attribute_rank_report(Q, label: str) -> dict:
+    """Check the rank hypothesis of the profile-identifiability proposition.
+
+    That proposition carries the archetype-conditional response probabilities
+    to the attribute profiles only when the row-normalized Q-matrix has full
+    column rank ``K``. Unlike the independence condition checked elsewhere in
+    this module, this one depends on ``Q`` alone, so it can be evaluated
+    before any model is fitted.
+
+    When the rank falls short, the shortfall is reported together with the
+    singular-value gap, since a deficiency that is exact rather than numerical
+    is the difference between attributes that no item set can separate and
+    attributes that are merely poorly conditioned. Deficiency cannot be
+    repaired by anchoring: the anchor submatrix is a row submatrix of ``Q*``
+    and so cannot have higher rank than ``Q*`` itself.
+    """
+    Q = np.asarray(Q, dtype=float)
+    n_j = Q.sum(axis=1)
+    if (n_j == 0).any():
+        raise ValueError(f"{label}: Q has {int((n_j == 0).sum())} rows requiring no attribute")
+    Q_star = Q / n_j[:, None]
+    J, K = Q_star.shape
+    s = np.linalg.svd(Q_star, compute_uv=False)
+    tol = s.max() * max(Q_star.shape) * np.finfo(float).eps
+    rank = int((s > tol).sum())
+
+    print(f"\n=== {label} ===")
+    print(f"  Q*: {J} x {K}   rank={rank}  (K={K})   full_rank={rank == K}")
+    print(f"  sigma_min={s[-1]:.3e}  sigma_max={s[0]:.3e}  cond={s[0] / s[-1]:.3e}")
+    if rank < K:
+        # Attributes that appear in some null direction: those the response
+        # distribution cannot separate, whatever the archetype parameters.
+        null_basis = np.linalg.svd(Q_star)[2][rank:]
+        involved = int((np.abs(null_basis) > 1e-8).any(axis=0).sum())
+        print(
+            f"  DEFICIENT by {K - rank}: smallest retained sigma={s[rank - 1]:.3e}, "
+            f"largest discarded={s[rank]:.3e}"
+        )
+        print(f"  attributes appearing in some null direction: {involved} of {K}")
+    return {
+        "fit": label,
+        "J": J,
+        "K": K,
+        "rank": rank,
+        "full_rank": rank == K,
+        "sigma_min": float(s[-1]),
+        "cond": float(s[0] / s[-1]),
+    }
+
+
 def _report(label: str, P: np.ndarray, seed: int = 0) -> dict:
     result = rank_certificate(P, seed=seed)
     worst = max(g["cond"] for g in result["per_group"])
