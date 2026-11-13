@@ -40,7 +40,7 @@ from src.mola.identifiability import archetype_item_probs, rank_certificate
 # M as selected by held-out predictive log-likelihood in each experiment; see
 # the model-selection subsections and the scale-point table in the paper.
 FRAC_SUBTR_M = 5
-EDNET_SCALE_POINTS = {200: 16, 2000: 16}
+EDNET_SCALE_POINTS = {200: 2, 2000: 16}
 
 
 def attribute_rank_report(Q, label: str) -> dict:
@@ -193,7 +193,10 @@ def check_ednet(n_learners: int, selected_m: int) -> dict:
         population_df, population_df["user_id"].unique(), item_id_to_row, Q.shape[0]
     )
 
-    model = MoLA(Q=Q, n_components=selected_m, max_iter=50)
+    # Same kwargs as the high-dimensional experiment, so the condition is
+    # certified at the parameters the paper reports rather than at a fit
+    # under a different prior.
+    model = MoLA(Q=Q, n_components=selected_m, max_iter=50, theta_prior=(2, 2))
     model.fit(X_param)
     return _report(
         f"EdNet-KT1, {n_learners:,} learners (fitted parameters)",
