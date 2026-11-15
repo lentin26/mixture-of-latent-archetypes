@@ -30,7 +30,7 @@ class _MoLABase:
         tol: float = 1e-5,
         pseudo_likelihood: bool = False,
         mu_prior: tuple = (2, 2),
-        theta_prior: tuple = (4, 5),
+        theta_prior: tuple = (2, 2),
         pi_prior: float = 1.0,
         random_state: int | None = 746,
         model: str = "MoLA-id",
