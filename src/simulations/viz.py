@@ -27,6 +27,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MaxNLocator
 
 from src.simulations.dgp import SimulatedDataset
 from src.simulations.factors import (
@@ -279,6 +280,87 @@ def plot_component_recovery(
 
     handles, labels_ = flat[0].get_legend_handles_labels()
     fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    fig.legend(
+        handles, labels_, loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=len(labels_), frameon=False, fontsize=8,
+    )
+    if save is not None:
+        _savefig(fig, save)
+    return fig
+
+
+def plot_component_recovery_variants(
+    mu_true,
+    variants: "dict[str, object]",
+    *,
+    skill_labels: Sequence | None = None,
+    row_notes: "dict[str, str] | None" = None,
+    max_cols: int = 4,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+):
+    """Compare several recovered profile sets against one generating set.
+
+    One row per entry of ``variants`` (a mapping from row label to an
+    ``(M, K)`` recovered ``mu``, drawn in insertion order) and one column per
+    archetype, so rows differ only in how the fit was identified and columns
+    are directly comparable down the figure. Each row is Hungarian-aligned to
+    ``mu_true`` on its own, since the label permutation is arbitrary and need
+    not agree across fits.
+
+    ``row_notes`` adds a short annotation to each row's leftmost axis -- a
+    recovery RMSE, say -- so the visual difference between rows can be read
+    against a number.
+
+    Generalizes :func:`plot_component_recovery`, which handles the single
+    recovered set.
+    """
+    if not variants:
+        raise ValueError("variants must contain at least one recovered profile set")
+
+    mu_true = _as_matrix(mu_true)
+    aligned = []
+    for label, mu_est in variants.items():
+        t, e, perm, n_matched = align_recovered_components(mu_true, mu_est)
+        aligned.append((label, t, e, perm, n_matched))
+
+    n_matched = min(a[4] for a in aligned)
+    nrows = len(aligned)
+    ncols = min(max_cols, n_matched)
+    if n_matched > ncols:
+        raise ValueError(
+            f"{n_matched} archetypes exceeds max_cols={ncols}; this layout puts "
+            "one archetype per column so that rows stay comparable"
+        )
+
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=figsize or (3.4 * ncols, 2.8 * nrows),
+        squeeze=False, sharex=True, sharey=True,
+    )
+
+    for r, (label, t, e, perm, _) in enumerate(aligned):
+        x_true, labels = _skill_axis(t.shape[1], skill_labels)
+        x_est, _ = _skill_axis(e.shape[1], skill_labels)
+        for i in range(n_matched):
+            ax = axes[r][i]
+            ax.plot(x_true, t[i], **ASSUMED_KW)
+            ax.plot(x_est, e[perm[i]], **RECOVERED_KW)
+            if r == 0:
+                ax.set_title(f"Archetype {i + 1}", fontsize=9)
+            _style_profile_axes(
+                ax, x_true, labels,
+                ylabel=(i == 0),
+                xlabel=(r == nrows - 1),
+            )
+        note = (row_notes or {}).get(label)
+        axes[r][0].set_ylabel(
+            f"{label}\nProficiency" if note is None else f"{label}\n({note})\nProficiency",
+            fontsize=8,
+        )
+
+    handles, labels_ = axes[0][0].get_legend_handles_labels()
+    fig.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
     fig.legend(
         handles, labels_, loc="lower center", bbox_to_anchor=(0.5, 0.0),
         ncol=len(labels_), frameon=False, fontsize=8,
@@ -1570,7 +1652,8 @@ def plot_m_sensitivity(
             y = [r.model.effective_n_archetypes() for r in results]
         else:
             y = [r.metrics[metric] for r in results]
-        ax.plot(m_values, y, marker="o", color="#1f77b4")
+        ax.plot(m_values, y, marker="o", color="#1f77b4", linewidth=1.8,
+                markeredgecolor="black", markeredgewidth=0.8)
         _mark_reference_level(ax, true_n_archetypes)
         ax.set_xlabel(humanize_label("n_components_fit", label_map))
         ax.set_ylabel(humanize_label(metric, label_map))
@@ -1578,7 +1661,6 @@ def plot_m_sensitivity(
         ax.grid(alpha=0.3, linewidth=0.6)
     for j in range(len(metrics), len(flat)):
         flat[j].set_visible(False)
-    fig.suptitle("Sensitivity to the number of archetypes", fontsize=12)
     fig.tight_layout()
     if save is not None:
         _savefig(fig, save)
@@ -1691,26 +1773,39 @@ def plot_setup_diagnostics(
     expected = data.pi.ravel() * len(data.z)
     ax.bar(np.arange(n_archetypes), counts, color="#1f77b4", alpha=0.8, label="realized")
     ax.scatter(np.arange(n_archetypes), expected, color="#d62728", marker="_", s=400,
-               linewidths=2, label="expected (pi * n_learners)", zorder=3)
-    ax.set_xlabel("archetype")
-    ax.set_ylabel("number of learners")
+               linewidths=2, label=r"expected ($\pi_m N$)", zorder=3)
+    ax.set_xticks(np.arange(n_archetypes))
+    ax.set_xlabel("Archetype")
+    ax.set_ylabel("Number of learners")
     ax.set_title("Users per archetype", fontsize=9)
     ax.legend(fontsize=7)
 
     # 2. responses per user
     ax = flat[1]
     responses_per_user = (~np.isnan(data.X)).sum(axis=1)
-    ax.hist(responses_per_user, bins=min(20, len(np.unique(responses_per_user))), color="#1f77b4")
-    ax.set_xlabel("responses per learner")
-    ax.set_ylabel("number of learners")
-    ax.set_title("Responses per user", fontsize=9)
+    unique_counts = np.unique(responses_per_user)
+    if len(unique_counts) == 1:
+        # Constant across learners (e.g. iid sampling): a histogram would
+        # falsely suggest a spread, so draw a single bar at the fixed value
+        # instead and state it directly in the title.
+        fixed_value = int(unique_counts[0])
+        ax.bar([fixed_value], [len(responses_per_user)], width=0.6, color="#1f77b4")
+        ax.set_xlim(fixed_value - 1, fixed_value + 1)
+        ax.set_xticks([fixed_value])
+        ax.set_title(f"Responses per user\nconstant at {fixed_value}", fontsize=9)
+    else:
+        ax.hist(responses_per_user, bins=min(20, len(unique_counts)), color="#1f77b4")
+        ax.set_title("Responses per user", fontsize=9)
+    ax.set_xlabel("Responses per learner")
+    ax.set_ylabel("Number of learners")
 
     # 3. items per skill
     ax = flat[2]
     items_per_skill = np.asarray(data.Q.sum(axis=0)).ravel()
     ax.bar(np.arange(len(items_per_skill)), items_per_skill, color="#1f77b4")
-    ax.set_xlabel("skill index")
-    ax.set_ylabel("number of items")
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel("Skill index")
+    ax.set_ylabel("Number of items")
     ax.set_title("Items per skill", fontsize=9)
 
     # 4. skills per item
@@ -1718,16 +1813,16 @@ def plot_setup_diagnostics(
     skills_per_item = np.asarray(data.Q.sum(axis=1)).ravel()
     bins = np.arange(skills_per_item.min(), skills_per_item.max() + 2) - 0.5
     ax.hist(skills_per_item, bins=bins, color="#1f77b4", rwidth=0.8)
-    ax.set_xlabel("skills required")
-    ax.set_ylabel("number of items")
+    ax.set_xlabel("Skills required")
+    ax.set_ylabel("Number of items")
     ax.set_title("Skills per item", fontsize=9)
 
     # 5. Q-matrix column (skill) similarity
     ax = flat[4]
     similarities = _pairwise_jaccard(data.Q)
     ax.hist(similarities, bins=20, range=(0, 1), color="#1f77b4")
-    ax.set_xlabel("pairwise Jaccard similarity")
-    ax.set_ylabel("number of skill pairs")
+    ax.set_xlabel("Pairwise Jaccard similarity")
+    ax.set_ylabel("Number of skill pairs")
     ax.set_title(f"Q-matrix column similarity\nmax={similarities.max():.2f}", fontsize=9)
 
     # 6. archetype separation

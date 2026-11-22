@@ -190,6 +190,42 @@ def test_kmeans_init_depends_on_the_data(toy):
     assert not np.allclose(a.theta, b.theta)
 
 
+def test_kmeans_init_pi_is_valid_when_a_cluster_is_left_empty(toy, monkeypatch):
+    """Regression test: if k-means' final labeling skips a cluster index (in
+    principle possible on sufficiently degenerate data, though sklearn's own
+    empty-cluster relocation makes it rare in practice -- confirmed
+    unreachable across the full OFAT grid plus real fraction-subtraction and
+    EdNet data), `pi` must still be a valid, correctly aligned distribution:
+    sum to 1, with each entry attributed to its actual cluster label rather
+    than written into the wrong position by raw count order.
+    """
+    import sklearn.cluster
+
+    model = _make_model(toy)
+    n = toy["X"].shape[0]
+    # N_COMPONENTS == 3; skip cluster label 1 entirely, mimicking what
+    # np.unique(labels) sees when a cluster ends up with zero points.
+    fake_labels = np.where(np.arange(n) % 2 == 0, 0, 2)
+
+    def fake_fit_predict(self, X):
+        # fit_predict normally sets cluster_centers_ as a side effect;
+        # _kmeans_init reads it afterward, so stub a valid-shaped array.
+        self.cluster_centers_ = np.full((self.n_clusters, X.shape[1]), 0.5)
+        return fake_labels
+
+    monkeypatch.setattr(sklearn.cluster.KMeans, "fit_predict", fake_fit_predict)
+    model._init_fit(model._prepare_X(toy["X"]))
+
+    # Pre-fix: pi[:2] would be overwritten with clusters 0 and 2's counts
+    # (misaligned -- cluster 2's share landing in slot 1), and pi[2] would
+    # keep the untouched 1/3 fallback, summing to 4/3 overall. Correctly
+    # aligned and renormalized: clusters 0 and 2 (equal counts) each get
+    # 0.5/(4/3) = 0.375; cluster 1 (never observed) keeps the fallback
+    # 1/3, rescaled by the same factor to 0.25. Sums to 1 exactly.
+    assert model.pi.sum() == pytest.approx(1.0)
+    np.testing.assert_allclose(model.pi.ravel(), [0.375, 0.25, 0.375], rtol=1e-10)
+
+
 # --------------------------------------------------------------------------- #
 # X transforms
 # --------------------------------------------------------------------------- #
@@ -628,3 +664,26 @@ def test_get_prior_exp_skill_prof_is_weighted_mean_of_archetypes(fitted):
     assert prof.shape == (N_SKILLS,)
     np.testing.assert_allclose(prof, (fitted.pi.ravel() @ fitted.mu))
     assert np.all((prof >= 0.0) & (prof <= 1.0))
+
+
+def test_get_avg_nll_from_data_accepts_a_dense_nan_masked_matrix(fitted, toy):
+    """Missing responses are NaN in a dense matrix, which every other read-out
+    accepts. This one reached `create_X1_and_X2`'s dense branch, where
+    `X2 = 1 - X1` propagates NaN into the observation mask and the
+    log-likelihood comes back NaN."""
+    X = np.asarray(toy["X"], dtype=float).copy()
+    X[np.random.default_rng(0).random(X.shape) < 0.2] = np.nan
+
+    total_nll, n_obs = fitted.get_avg_nll_from_data(X)
+    assert np.isfinite(total_nll) and total_nll > 0
+    assert n_obs == int((~np.isnan(X)).sum())
+
+
+def test_get_avg_nll_from_data_is_unchanged_for_a_complete_matrix(fitted, toy):
+    """The fix normalizes the input; it must not move the answer for input
+    that already worked."""
+    X = np.asarray(toy["X"], dtype=float)
+    dense = fitted.get_avg_nll_from_data(X.copy())
+    sparse = fitted.get_avg_nll_from_data(fitted._to_sparse(X.copy()))
+    assert dense[1] == sparse[1]
+    np.testing.assert_allclose(dense[0], sparse[0], rtol=0, atol=1e-9)

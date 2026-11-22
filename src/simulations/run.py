@@ -101,9 +101,18 @@ def _kmeans_init(
     )
     labels = km.fit_predict(scores)
     mu = np.clip(km.cluster_centers_, 0.05, 0.95)
-    _, counts = np.unique(labels, return_counts=True)
+    unique_labels, counts = np.unique(labels, return_counts=True)
     pi = np.full(n_components, 1.0 / n_components)
-    pi[: counts.size] = counts / counts.sum()
+    # Indexed by the actual cluster labels present, not by position -- a
+    # cluster missing from `labels` (possible in principle if KMeans, which
+    # normally relocates empty clusters during fitting, still ends up with
+    # one for sufficiently degenerate data) would otherwise have a later
+    # cluster's count written into its slot. The final renormalization folds
+    # any leftover 1/n_components fallback mass for an unseen cluster back
+    # into a valid distribution, since `counts.sum()` alone only accounts
+    # for the clusters that were actually observed.
+    pi[unique_labels] = counts / counts.sum()
+    pi = pi / pi.sum()
     mask = ~np.isnan(X)
     item_mean = np.nanmean(X, axis=0, keepdims=True).T
     # 0.5: maximum-entropy fallback for an item with no observed responses at all.
@@ -211,6 +220,23 @@ class SimulationResult:
     data: SimulatedDataset
 
 
+def _mean_nll_se(y_true: np.ndarray, y_prob: np.ndarray, eps: float = 1e-12) -> float:
+    """Standard error of the mean held-out negative log-likelihood.
+
+    The held-out NLL is an average over held-out responses, so its sampling
+    error is the usual ``sd / sqrt(n)`` of the per-response terms. Reported
+    alongside the mean so a selection rule can use the data's own variability
+    as its tolerance rather than a chosen constant.
+    """
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    p = np.clip(np.asarray(y_prob, dtype=float).ravel(), eps, 1.0 - eps)
+    keep = ~np.isnan(y_true)
+    terms = -(y_true[keep] * np.log(p[keep]) + (1.0 - y_true[keep]) * np.log(1.0 - p[keep]))
+    if terms.size < 2:
+        return float("nan")
+    return float(terms.std(ddof=1) / np.sqrt(terms.size))
+
+
 def _score_fit(
     data: SimulatedDataset,
     model: MoLAWithInit,
@@ -247,6 +273,11 @@ def _score_fit(
         "holdout_auc": masked_auc(y_true, y_prob),
         "holdout_brier": brier_score(y_true, y_prob),
         "holdout_nll": masked_nll(y_true, y_prob),
+        # Standard error of that mean, over the held-out responses. Lets a
+        # caller apply a one-standard-error rule -- pick the smallest model
+        # within one SE of the best -- instead of thresholding the held-out
+        # NLL at a hand-chosen tolerance.
+        "holdout_nll_se": _mean_nll_se(y_true, y_prob),
         "n_em_iters": len(model.nll_trace),
         "final_nll": float(model.nll_trace[-1]) if model.nll_trace else float("nan"),
         "train_time_sec": train_time,
